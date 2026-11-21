@@ -1,0 +1,12 @@
+{
+  "prompt": {
+    "path": "prompt",
+    "kind": "text"
+  },
+  "source": {
+    "default": "Chat-Error/Long-instructions"
+  },
+  "category": {
+    "default": "natural_questions_10_200_docs"
+  }
+}

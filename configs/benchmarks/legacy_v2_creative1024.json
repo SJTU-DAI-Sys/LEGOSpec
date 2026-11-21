@@ -1,0 +1,31 @@
+{
+  "protocol": "component-acceptance-v2-creative1024",
+  "target_family": "Qwen3-4B",
+  "manifest": "tests/acceptance_benchmark_v2/data/manifest.jsonl",
+  "creative_writing_manifest": "tests/acceptance_benchmark_v2/data/creative_writing.jsonl",
+  "creative_writing_prompts": "tests/creative_writing_20261113/creative_writing_64.prompts.jsonl",
+  "requests_per_temperature": 1120,
+  "regular_requests": 800,
+  "creative_writing_requests": 64,
+  "long_requests": 256,
+  "max_new_tokens": 1024,
+  "seed": 42,
+  "temperatures": [
+    0,
+    1
+  ],
+  "thinking": false,
+  "block_size": 8,
+  "regular_task_macro_datasets": [
+    "alpaca",
+    "gsm8k",
+    "livecodebench",
+    "math500",
+    "mbpp",
+    "mtbench"
+  ],
+  "creative_writing_reported_separately": true,
+  "preserve_existing_frozen_manifests": true,
+  "manifest_sha256": "c50c612a5b0d14f97e3339b9eb80acc5e2515ece8aa96c2c88992d586878febd",
+  "creative_writing_sha256": "c4a97d6245b117a23c81ac34750728fddd58caa127a6b2ca22349c4426d357f3"
+}

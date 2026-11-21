@@ -1,0 +1,46 @@
+{
+  "protocol": "acceptance-v3-natural-long32to40k",
+  "target_family": "Qwen3-4B",
+  "manifest": "tests/full_train_hf_20261114/panel/qwen3_4b/manifest.jsonl",
+  "creative_writing_manifest": "tests/acceptance_benchmark_v2/data/creative_writing.jsonl",
+  "creative_writing_prompts": "tests/creative_writing_20261113/creative_writing_64.prompts.jsonl",
+  "requests_per_temperature": 879,
+  "regular_requests": 800,
+  "creative_writing_requests": 64,
+  "long_requests": 15,
+  "max_new_tokens": 1024,
+  "seed": 42,
+  "temperatures": [
+    0,
+    1
+  ],
+  "thinking": false,
+  "block_size": 8,
+  "regular_task_macro_datasets": [
+    "alpaca",
+    "gsm8k",
+    "livecodebench",
+    "math500",
+    "mbpp",
+    "mtbench"
+  ],
+  "creative_writing_reported_separately": true,
+  "preserve_existing_frozen_manifests": true,
+  "manifest_sha256": "1d1efcca26a253225619251356dc7fc08a4d853dd01278cd14c6e9839a9e9f6e",
+  "creative_writing_sha256": "c4a97d6245b117a23c81ac34750728fddd58caa127a6b2ca22349c4426d357f3",
+  "eval_mode": "normal",
+  "allowed_eval_modes": [
+    "normal",
+    "full_train"
+  ],
+  "entrypoint": "tests/acceptance_benchmark_v3/run.py",
+  "questions_manifest": "tests/full_train_hf_20261114/panel/questions.jsonl",
+  "questions_sha256": "c0490989d4db78899b96745d647f03862fe2d7cf80a2e55e1b8bf39633f5eaf3",
+  "long_reference_band": [
+    32768,
+    40960
+  ],
+  "long_domain_coverage": 4,
+  "preserve_existing_queues": true,
+  "full_train_defaults": "configs/benchmarks/full_train_long32to64k_4domains_qwen4b_yarn2.json"
+}

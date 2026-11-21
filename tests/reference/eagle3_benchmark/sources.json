@@ -1,0 +1,19 @@
+{
+  "protocol": "component-acceptance-v1",
+  "parent_harness": "tests/round1_training_20261026/benchmark/harness",
+  "parent_sha256": {
+    "sources.json": "720a8d311e3280630e1cdc978cb35f86d556523838f7fc50aaddd93f63aaa897",
+    "test_components.py": "8cc5a3607d36d7fac2efa83f04a1d6cf7a897768d892d0eeb9aaf3d9a54bbd42",
+    "run.py": "a77ece7a517ab4fadc94b8c7e2dc5c4201d644cd96c3af09f0e854e867f533de",
+    "test_jsonl.py": "8229263a95dcb2afd9a0503d1b424e7fb3a058d8d71c0901047a61e38a381b39",
+    "jsonl_io.py": "0d768ee01620dcb6d3b05dbc006bc9a8f7f6e08a5593196118fc2272bfb03d74",
+    "summarize.py": "61d4828520f4dca37ec86ebbb14d82fdfc23567540e5d2c61d0017a49e99618a",
+    "engine.py": "1953aa96b2e27ec7937a5a7adb4dfa148cd7c45dcc92745ff6a8c70b540dc7b2",
+    "canonical_mtbench.py": "a05c71f2b56873bbbf5ebf61ca1a1467d24a274e38fc63b6689274a9846f97bc",
+    "test_verifier.py": "f18638ba87181a502ed308abcdf713196d05b6f03d7c1424b5e21a10cbd483d8",
+    "compare.py": "3425dd5b38ffe6a61f4c469a713b9194746d1835f8e95b259fa8c1ee46e8ccbe",
+    "prepare.py": "3a664d447584dff61644bda7fb6dec0aa12eb6eb6eb825befcb14bdb9d4b79f4",
+    "PROTOCOL.md": "637a9aba8352569d6bc6339f58fd7e20c6fdf3b57bcb1f30e56e8d84e548fbd1"
+  },
+  "change": "Dispatch EAGLE3 to autoregressive draft/cache adapter; unchanged verifier, seed and summary definitions."
+}

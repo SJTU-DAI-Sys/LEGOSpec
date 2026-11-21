@@ -1,0 +1,4 @@
+{
+  "multifieldqa_en_mixup": "Please answer the following question based on the given passages.\n\nArticle: {context}\n\nPlease answer the following question based on the above passages.\n\nQuestion: {input}\nAnswer:",
+  "hotpotwikiqa_mixup": "Answer the question based on the given passages.\n\nArticle: {context}\n\nPlease answer the following question based on the above passages.\n\nQuestion: {input}\nAnswer:"
+}

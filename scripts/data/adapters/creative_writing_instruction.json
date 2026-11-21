@@ -1,0 +1,5 @@
+{
+  "prompt": {"path": "instruction", "kind": "text"},
+  "source": {"path": "source", "default": "Crownelius/Opus-4.5-WritingStyle-1000x"},
+  "category": {"path": "difficulty", "default": "creative"}
+}

@@ -1,0 +1,83 @@
+{
+  "upstream": {
+    "repository": "sgl-project/sglang",
+    "commit": "6d0d305f198088227d258a470e54aaf5e5b95263"
+  },
+  "original_config_sha256": "0e17eea7f7c9112b28840c50ed6a6ac39293a2249df797b4e93d7c712b437468",
+  "candidate_config": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public/tests/sglang_dflash2_export_20261121/config.sglang.json",
+  "original_parser": {
+    "num_hidden_layers": 5,
+    "num_target_layers": 48,
+    "block_size": 8,
+    "conv_kernel_size": 0,
+    "conv_group_size": 0,
+    "selector_rank": 0,
+    "selector_top_k": 0,
+    "output_multiplier": 1.0,
+    "final_logit_softcapping": null,
+    "target_layer_ids": null,
+    "mask_token": "<|MASK|>",
+    "mask_token_id": null,
+    "projector_type": null,
+    "shift_label": null,
+    "pure_draft_prefix_len": null,
+    "gru_hidden_dim": null,
+    "emb_dim": null,
+    "attention_sink_bias": false,
+    "attention_value_scale": null,
+    "is_mla": false
+  },
+  "candidate_parser": {
+    "num_hidden_layers": 5,
+    "num_target_layers": 48,
+    "block_size": 8,
+    "conv_kernel_size": 2,
+    "conv_group_size": 16,
+    "selector_rank": 256,
+    "selector_top_k": 16,
+    "output_multiplier": 1.0,
+    "final_logit_softcapping": 30.0,
+    "target_layer_ids": [
+      1,
+      5,
+      17,
+      29,
+      41
+    ],
+    "mask_token": "<|MASK|>",
+    "mask_token_id": 4,
+    "projector_type": null,
+    "shift_label": null,
+    "pure_draft_prefix_len": null,
+    "gru_hidden_dim": null,
+    "emb_dim": null,
+    "attention_sink_bias": false,
+    "attention_value_scale": null,
+    "is_mla": false
+  },
+  "upstream_activation_dispatch_error": "Unsupported DFlash activation: gelu_pytorch_tanh. Supported activations are silu and swigluoai.",
+  "patched_runtime_source": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_swa_20261112/tests/h8002_sglang_gemma4_12b_20261119/source/sglang/srt/models/dflash.py",
+  "patched_runtime_source_sha256": "2875016e2b0db9cae41b07dcfcdb22359af88f920c1f17b12c35ccf26fee5ba7",
+  "patched_runtime_meta_checks": [
+    {
+      "tp_size": 1,
+      "rank": 0,
+      "checkpoint_tensors": 81,
+      "mapped_parameters": 66,
+      "full_name_coverage": true,
+      "meta_constructor_and_loader": "passed"
+    },
+    {
+      "tp_size": 2,
+      "rank": 0,
+      "checkpoint_tensors": 81,
+      "mapped_parameters": 66,
+      "full_name_coverage": true,
+      "meta_constructor_and_loader": "passed"
+    }
+  ],
+  "gpu_inference_tested": false,
+  "weight_values_changed": false,
+  "published_config_changed": false,
+  "conclusion": "Config schema conversion passes; upstream GELU support is required. Patched runtime passes meta loading only."
+}

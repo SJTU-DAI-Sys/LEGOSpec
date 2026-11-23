@@ -1,0 +1,185 @@
+{
+  "directories": [
+    "data",
+    "execution",
+    "logger",
+    "optim",
+    "runtime",
+    "target"
+  ],
+  "python_modules": 24,
+  "setup_lines": 414,
+  "old_setup_lines": 1808,
+  "checked_active_python_files": 175,
+  "old_imports_remaining": 0,
+  "reverse_setup_runner_imports": 0,
+  "namespace_package_discovery": "passed",
+  "regression": {
+    "initial_passed": 539,
+    "initial_failed": 38,
+    "rechecked_files_passed": 56,
+    "final_unique_passed": 577,
+    "skipped": 9,
+    "subtests_passed": 13,
+    "skip_reason": "Existing candidate-only CE contract"
+  },
+  "equivalence": {
+    "exact_forward_gradient_metric_cases": [
+      {
+        "proposal": "parallel",
+        "objective": "soft_ce",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "soft_ce",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "weighted_sum",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "weighted_sum",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "dpal_renyi",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "dpal_renyi",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "e2e_tv",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "parallel",
+        "objective": "e2e_tv",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "soft_ce",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "soft_ce",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "weighted_sum",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "weighted_sum",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "dpal_renyi",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "dpal_renyi",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "e2e_tv",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "rnn",
+        "objective": "e2e_tv",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "soft_ce",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "soft_ce",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "weighted_sum",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "weighted_sum",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "dpal_renyi",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "dpal_renyi",
+        "mode": "optimized"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "e2e_tv",
+        "mode": "legacy"
+      },
+      {
+        "proposal": "residual_selector",
+        "objective": "e2e_tv",
+        "mode": "optimized"
+      }
+    ],
+    "cross_layout_resume": "exact",
+    "checked_resume_fields": [
+      "optimizer",
+      "scheduler",
+      "fp32_master_params",
+      "rng",
+      "cursor",
+      "model_parameters"
+    ]
+  },
+  "files": {
+    "legospec/training/outputs.py": "864b8e09058a03eaae9fe501a7e35d87d31be8897d2f4b8d8e531dba75ee4b6b",
+    "legospec/training/config.py": "25ad53bf4f07206a1932dc0e2fb221ca317bb92ed094c07df584e622500c7edd",
+    "legospec/training/__init__.py": "3c249b44f2baa8ebb5456b7f921ccd8856588c5753f763443b64e2d35d66619b",
+    "legospec/training/target/features.py": "fd1a5cf44fbcdf33a9a783d28680c03dff90f314b3523536a32346dc2d274cee",
+    "legospec/training/target/streaming.py": "939c79d18ac8884f40173eec0b38a042f44dc8d0a0753fb8cdbadaebf92e5e06",
+    "legospec/training/runtime/checkpoint.py": "4f504a56d80af4aac6e9db3e0ef496e9b9cdb6227938a6dfc223d0944b890b0a",
+    "legospec/training/runtime/runner.py": "a9715e3d089e482f8df9e0eb6bb1295f4934e755c78ae64802f5c6fd45f0f3e8",
+    "legospec/training/runtime/setup.py": "9c314bd63047f0497b34b225bad52a37216596d3cf5786c67cfeda9958b09aea",
+    "legospec/training/runtime/state.py": "779eeec7ea9dffdc580ec899dda6758055008506b4bb9c2ec736a0a7c41682e2",
+    "legospec/training/data/batch.py": "c015fb5e49f14cc1874177f3e929180a8a8c0b1c246be50ead47980db76993d9",
+    "legospec/training/data/layout.py": "f815d0954b1f0ad4e44319beb5377e7164997830e2e7cea611edf9b353fd2dc5",
+    "legospec/training/data/planning.py": "5f8337e1abeedd9fe8c6b2920285f46dadf7099603c87dd08ba51bfd55ede0fc",
+    "legospec/training/data/loader.py": "a1fa8ce291c0a4c7f709fc0da29246b74b4dfbfde64e227999abf114921e4026",
+    "legospec/training/data/prefetch.py": "72d637f153bccdeea176069a1d4c47f209fbdfdb92c8070f8680856c7c14dc17",
+    "legospec/training/optim/optimizer.py": "bc6b28ca4d034f1ef5a511f622e8d1418fdf21076cfda3b82bf98e1b328e0d04",
+    "legospec/training/optim/scheduler.py": "87968d6c5fe3f3acf28cb2c6131451f4a3101fc5541b9599c7e9cb010d1b0db7",
+    "legospec/training/optim/fsdp_layout.py": "e4cb3b1c8d8b223a9983576a8989170504d57b4e297fed6ee4140f4e8fc3df89",
+    "legospec/training/optim/muon.py": "1888a26824003c592a514659c1f7e55b72350e5f27535e5823b969c3dd8764ee",
+    "legospec/training/logger/metrics.py": "43798b7c739abfd2530fb7c4a90d1f799826c09c014fe1195928f080118471e9",
+    "legospec/training/logger/logging.py": "69702048c8a71dfcfc3d6a93f9f7e632ca1ee6313d30666dde14f4ceb16684d2",
+    "legospec/training/execution/supervision.py": "d8cb7f770803697fcf991c22d8d55d5e9a4b280c08d678c70d96696fd3887382",
+    "legospec/training/execution/step.py": "c8c9d357da875a316145b384d77205945902fc2a47f0bb39ff26c8f7ca84a1ca",
+    "legospec/training/execution/sampled.py": "d8d9a8c075e863b6fdee3bcab531d4931d57de016bdffcd0f9ad012b14a75e0c",
+    "legospec/training/execution/windows.py": "25d9f3c0d916ed125cf5aff9830e17f9141ebf60e80af6090239b17f1a2c6fbb"
+  }
+}

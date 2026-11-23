@@ -1,0 +1,61 @@
+import torch
+from torch import nn
+
+from legospec.modeling.draft.contracts import ProposalOutput
+
+
+class ParallelProposal(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+    def prediction_hidden(self, features, context):
+        batch_size, num_anchors = context.inputs.anchor_positions.shape
+        return features.draft_hidden_states.reshape(
+            batch_size, num_anchors, self.config.block_size, -1
+        )[..., 1:, :]
+
+    @staticmethod
+    def project_rows(head, values, context):
+        rows = context.inputs.projection_rows
+        if rows is None:
+            return head(values)
+        return rows.scatter_projection(head(rows.gather_projection(values)))
+
+    def forward(self, features, context, shared_ops):
+        draft_hidden_states = self.prediction_hidden(features, context)
+        output = ProposalOutput(
+            draft_hidden_states=draft_hidden_states, draft_state=features.draft_state
+        )
+        if context.inputs.mode == "features":
+            return output
+        if shared_ops is None:
+            raise ValueError("Scoring requires the frozen target SharedOps")
+        draft_logits = self.project_rows(
+            shared_ops.lm_head, draft_hidden_states, context
+        )
+        output.draft_logits = output.base_logits = draft_logits
+        if context.inputs.mode == "sample":
+            temperature = context.inputs.temperature
+            draft_probabilities = torch.softmax(
+                draft_logits.float() / (temperature or 1.0), -1
+            )
+            output.draft_token_ids = (
+                draft_logits.argmax(-1)
+                if temperature == 0
+                else torch.multinomial(draft_probabilities.flatten(0, -2), 1).reshape(
+                    draft_logits.shape[:-1]
+                )
+            )
+            output.draft_probabilities = draft_probabilities
+        return output
+
+    def score_hidden(self, hidden_states, shared_ops, *, projection_rows=None):
+        logits = (
+            shared_ops.lm_head(hidden_states)
+            if projection_rows is None
+            else projection_rows.scatter_projection(
+                shared_ops.lm_head(projection_rows.gather_projection(hidden_states))
+            )
+        )
+        return ProposalOutput(hidden_states, draft_logits=logits)

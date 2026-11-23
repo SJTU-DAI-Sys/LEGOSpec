@@ -28,7 +28,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-samples", type=int)
     parser.add_argument("--concurrency", type=int, default=64)
     parser.add_argument(
-        "--load-balance", choices=("round-robin", "least-inflight"),
+        "--load-balance",
+        choices=("round-robin", "least-inflight"),
         default="round-robin",
     )
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -287,8 +288,11 @@ def regenerate(args: argparse.Namespace) -> dict[str, Any]:
     pending_servers: dict[Future, int] = {}
     inflight = [0] * len(valid_servers)
     next_server = 0
-    print(f"Dispatch: {args.load_balance}; servers={len(valid_servers)}; "
-          f"total_concurrency={workers}; resume_ids={len(processed)}", flush=True)
+    print(
+        f"Dispatch: {args.load_balance}; servers={len(valid_servers)}; "
+        f"total_concurrency={workers}; resume_ids={len(processed)}",
+        flush=True,
+    )
 
     def save_finished(done, output_handle, error_handle):
         nonlocal successes, failures
@@ -327,7 +331,10 @@ def regenerate(args: argparse.Namespace) -> dict[str, Any]:
                 if args.load_balance == "least-inflight":
                     server_index = min(
                         range(len(valid_servers)),
-                        key=lambda i: (inflight[i], (i - next_server) % len(valid_servers)),
+                        key=lambda i: (
+                            inflight[i],
+                            (i - next_server) % len(valid_servers),
+                        ),
                     )
                 else:
                     server_index = submitted % len(valid_servers)

@@ -42,7 +42,9 @@ arguments:
   build_dataset_num_proc: 32
   dataloader_num_workers: 8
   log_interval: 50
-  save_interval: 10000
+  save_interval: 15000
   report_to: wandb
   wandb_project: spec-decoding
   wandb_name: eagle3_sampled
+  save_strategy: interval
+  save_training_state: true

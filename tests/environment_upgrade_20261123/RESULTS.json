@@ -1,0 +1,95 @@
+{
+  "status": "complete",
+  "runtime": {
+    "executable": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/bin/python",
+    "prefix": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002",
+    "torch_runtime": "2.13.0+cu130",
+    "cuda": "13.0",
+    "bootstrap": "sglang.srt.distributed.bootstrap",
+    "causal_conv1d": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/lib/python3.11/site-packages/causal_conv1d_cuda.cpython-311-x86_64-linux-gnu.so",
+    "packages": {
+      "sglang": "0.5.21",
+      "sglang-kernel": "0.4.7",
+      "torch": "2.13.0",
+      "transformers": "5.12.1",
+      "triton": "3.7.1",
+      "flash-linear-attention": "0.5.2",
+      "causal-conv1d": "1.7.0",
+      "tilelang": "0.1.12",
+      "flashinfer-python": "0.6.18"
+    }
+  },
+  "environment_switch": {
+    "main": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002",
+    "resolved": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-sglang0521-py311-cu130",
+    "backup": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002.before-sglang0521-20261123"
+  },
+  "regression": {
+    "passed": 582,
+    "skipped": 9,
+    "subtests_passed": 13,
+    "seconds": 87.66,
+    "log": "regression.log"
+  },
+  "main_entrypoint": {
+    "passed": 23,
+    "seconds": 15.31,
+    "log": "main_entrypoint_checks.log"
+  },
+  "models": {
+    "gemma_tp2_result": {
+      "mode": "gemma_tp2",
+      "layers": [
+        1,
+        47
+      ],
+      "online_offline_equal": true,
+      "teacher_head_equal": true,
+      "backward": true
+    },
+    "gemma_result": {
+      "model": "gemma",
+      "layers": [
+        1,
+        47
+      ],
+      "tokens": 7,
+      "online_offline_equal": true,
+      "final_only_equal": true,
+      "teacher_head_equal": true,
+      "backward": true
+    },
+    "qwen35_tp2_result": {
+      "mode": "qwen35_tp2",
+      "layers": [
+        1,
+        39
+      ],
+      "online_offline_equal": true,
+      "teacher_head_equal": true,
+      "backward": true
+    },
+    "qwen_disagg_result": {
+      "mode": "qwen_disagg",
+      "layers": [
+        1,
+        35
+      ],
+      "online_offline_equal": true,
+      "teacher_head_equal": true,
+      "backward": true
+    },
+    "qwen_result": {
+      "model": "qwen",
+      "layers": [
+        1,
+        35
+      ],
+      "tokens": 7,
+      "online_offline_equal": true,
+      "final_only_equal": true,
+      "teacher_head_equal": true,
+      "backward": true
+    }
+  }
+}

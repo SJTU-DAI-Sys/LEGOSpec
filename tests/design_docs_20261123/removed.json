@@ -1,0 +1,20 @@
+[
+  "legospec/modeling/target/DESIGN.md",
+  "legospec/modeling/draft/DESIGN.md",
+  "legospec/modeling/target/custom_backend/DESIGN.md",
+  "legospec/modeling/target/sglang_backend/DESIGN.md",
+  "legospec/modeling/draft/objective/DESIGN.md",
+  "legospec/modeling/draft/proposal/DESIGN.md",
+  "legospec/modeling/draft/backbone/DESIGN.md",
+  "legospec/modeling/draft/context/DESIGN.md",
+  "legospec/modeling/draft/backbone/attention/DESIGN.md",
+  "legospec/modeling/draft/backbone/attention/backends/DESIGN.md",
+  "legospec/modeling/draft/backbone/attention/linear/DESIGN.md",
+  "legospec/modeling/draft/backbone/attention/access/DESIGN.md",
+  "legospec/training/target/DESIGN.md",
+  "legospec/training/runtime/DESIGN.md",
+  "legospec/training/data/DESIGN.md",
+  "legospec/training/optim/DESIGN.md",
+  "legospec/training/logger/DESIGN.md",
+  "legospec/training/execution/DESIGN.md"
+]

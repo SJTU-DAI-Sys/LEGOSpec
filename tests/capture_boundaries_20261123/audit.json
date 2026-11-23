@@ -1,0 +1,91 @@
+{
+  "python_files": 122,
+  "changes": [
+    {
+      "file": "legospec/data/DESIGN.md",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/data/hidden_cache.py",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/data/capture_engine.py",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/sglang.py",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/sglang_gemma4_capture.py",
+      "status": "deleted"
+    },
+    {
+      "file": "legospec/modeling/target/DESIGN.md",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/sglang_backend/DESIGN.md",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/sglang_backend/__init__.py",
+      "status": "deleted"
+    },
+    {
+      "file": "legospec/modeling/target/adapters/base.py",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/adapters/gemma.py",
+      "status": "changed"
+    },
+    {
+      "file": "tests/unit/test_hidden_feature_cache.py",
+      "status": "changed"
+    },
+    {
+      "file": "docs/COMPONENT_ORGANIZATION.md",
+      "status": "changed"
+    },
+    {
+      "file": "docs/SIMPLIFICATION_PLAN.md",
+      "status": "changed"
+    },
+    {
+      "file": "legospec/modeling/target/sglang_backend/parallel.py",
+      "status": "new"
+    },
+    {
+      "file": "legospec/modeling/target/sglang_backend/capture.py",
+      "status": "new"
+    },
+    {
+      "file": "tests/unit/test_native_capture.py",
+      "status": "new"
+    }
+  ],
+  "boundary_violations": [],
+  "deleted_file_references": [],
+  "other_findings": {
+    "modeling_to_training": [
+      {
+        "source": "legospec/modeling/draft/composable/objective/base.py",
+        "line": 9,
+        "target": "legospec.training.outputs"
+      },
+      {
+        "source": "legospec/modeling/draft/composable/objective/base.py",
+        "line": 11,
+        "target": "legospec.training.data.batch"
+      },
+      {
+        "source": "legospec/modeling/draft/composable/objective/dpal.py",
+        "line": 36,
+        "target": "legospec.training.outputs"
+      }
+    ],
+    "custom_backend_external_imports": []
+  }
+}

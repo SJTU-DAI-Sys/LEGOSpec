@@ -1,0 +1,19 @@
+{
+  "executable": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/bin/python",
+  "prefix": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002",
+  "torch_runtime": "2.13.0+cu130",
+  "cuda": "13.0",
+  "bootstrap": "sglang.srt.distributed.bootstrap",
+  "causal_conv1d": "/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/lib/python3.11/site-packages/causal_conv1d_cuda.cpython-311-x86_64-linux-gnu.so",
+  "packages": {
+    "sglang": "0.5.21",
+    "sglang-kernel": "0.4.7",
+    "torch": "2.13.0",
+    "transformers": "5.12.1",
+    "triton": "3.7.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0",
+    "tilelang": "0.1.12",
+    "flashinfer-python": "0.6.18"
+  }
+}

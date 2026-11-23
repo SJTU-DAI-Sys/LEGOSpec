@@ -1,0 +1,14 @@
+{
+  "source_sha256": "7faddf0e302f0612039baafd6207b5e04a13c13adf817204af999741b2197f98",
+  "description": "Frozen pre-refactor objective outputs, all model parameter gradients and ratio metrics, generated with seed 423 by the pinned original training wrapper. Original source archived outside the public tree. Tests compare exact FP32 values.",
+  "files": {
+    "tv.pt": "c44a16feb793072249db2292d65d6fcc7612555d09f15b083b51e8ae801d7c6b",
+    "hard_ce.pt": "a66b22152e3d92735f0241c8f6cce89f7251cb84be8c4505276d1ade50603bb1",
+    "l1.pt": "953695091abed183b06c1ea7830f19ee9b0c19662f7de7d594aee20d2d222e3e",
+    "forward_kl.pt": "ff84f62dbedc7fc285c9749cd84abf6301410c4cb85c09c8209237f5319e4b7f",
+    "opd_survival.pt": "e81a9ab68ab0fd996b6b9c1bf4b3d8028c38acfad45297b17adb3c5326b5693f",
+    "soft_ce.pt": "d41d3cee3783410f55d4862d6de7b77fd9ecaffa39d867206070e9f1723d6fb5",
+    "dpace.pt": "a0ae0726b1c7b4a527356112c4c827c47fc7e9a04a1d06cbdd1f0314e20ba6f8",
+    "tv_survival.pt": "514dd88d4621e106b311da4c65a4788a903f481b5ad0fbe474c33b93afe19e70"
+  }
+}

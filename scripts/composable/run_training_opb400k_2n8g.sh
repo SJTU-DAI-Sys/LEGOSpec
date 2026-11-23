@@ -15,7 +15,7 @@ Usage: MASTER_ADDR=<node-0 internal IP> NODE_RANK=<0|1> bash scripts/composable/
 Start once per node. Both nodes must use the same recipe and master address.
 MASTER_PORT is optional; each recipe has a distinct configured default port.
 PYTHON_BIN may select the shared Python environment. Default: repository .venv.
-LITESPEC_LOSS_BACKEND=inductor opts into the fused D-PAL runtime.
+LEGOSPEC_LOSS_BACKEND=inductor opts into the fused D-PAL runtime.
 Real runs stop all keepers first and restore the original keep.sh schedule after exit.
 --dry-run prints the training command without changing keeper processes.
 HELP
@@ -42,7 +42,7 @@ case "$1" in
     RUNTIME="${ROOT}/tests/regen_mix_2n8g_20261110/source"
     if [[ "$STEM" == 25swa_dpal_online_b1 ]]; then
       RUNTIME="${ROOT}/tests/regen_mix_2n8g_20261110/source_b1"
-      export LITESPEC_LOSS_BACKEND=inductor
+      export LEGOSPEC_LOSS_BACKEND=inductor
     fi
     ;;
   25swa_dpal_online_b1_qwen35_9b)
@@ -50,7 +50,7 @@ case "$1" in
     CONFIG_DIR="${ROOT}/scripts/config/qwen35_9b_mixed_2n8g_20261111"
     KEEPER_LOG_DIR="${ROOT}/tests/qz_math8_wildchat_20261111/training_logs"
     RUNTIME="${ROOT}/tests/regen_mix_2n8g_20261110/source_b1"
-    export LITESPEC_LOSS_BACKEND=inductor
+    export LEGOSPEC_LOSS_BACKEND=inductor
     ;;
   35dpal) STEM=35dpal__dflash__gqa4_swa512_gqa1_dense_conv2g16__rnn_r256__dpal_renyi; RUNTIME="${EXPERIMENT}/block_objectives/source" ;;
   05dpal) STEM=05dpal__dflash__gqa5_dense_conv2g16__rnn_r256__dpal_renyi; RUNTIME="${EXPERIMENT}/block_objectives/source" ;;
@@ -71,7 +71,7 @@ case "$1" in
 esac
 shift
 
-if [[ "$STEM" == *dpal_renyi && "${LITESPEC_LOSS_BACKEND:-auto}" == inductor ]]; then
+if [[ "$STEM" == *dpal_renyi && "${LEGOSPEC_LOSS_BACKEND:-auto}" == inductor ]]; then
   RUNTIME="${EXPERIMENT}/dpal_fused/source"
 fi
 

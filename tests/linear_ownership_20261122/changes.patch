@@ -1,0 +1,1292 @@
+--- before/legospec/modeling/draft/composable/backbone/attention/base.py
++++ after/legospec/modeling/draft/composable/backbone/attention/base.py
+@@ -0,0 +1,418 @@
++"""Shared dense/latent attention lifecycle: projections, KV commit and execution."""
++
++import torch
++from torch import nn
++from torch.nn import functional as F
++from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
++from legospec.modeling.draft.composable.backbone.kernels import BackboneKernels
++from legospec.modeling.draft.composable.contracts import LayerState
++
++
++class AttentionBase(nn.Module):
++    """Shared scaffold for the DFlash-family attention modes.
++
++    Subclasses own only the projection parameterization: ``_init_projections``
++    builds the weights and must define ``scaling``, ``num_key_value_groups``,
++    and ``o_proj`` (the shared forward relies on them); ``_compute_qkv``
++    returns rotated ``(q, k, v)`` in ``(batch, heads, seq, dim)`` layout with
++    keys ordered context-then-draft. Everything the modes must agree on —
++    KV-cache updates, backend dispatch, fully-masked-query zeroing, and the
++    output projection — lives here so it is maintained in exactly one place.
++    """
++
++    def __init__(
++        self,
++        config: Qwen3Config,
++        layer_idx: int,
++        kernels: BackboneKernels,
++    ):
++        super().__init__()
++        self.config = config
++        self.layer_idx = layer_idx
++        self.attention_dropout = config.attention_dropout
++        if config._attn_implementation == "flex_attention":
++            assert (
++                config.attention_dropout == 0.0
++            ), "DFlash FlexAttention requires attention_dropout=0.0"
++        self.is_causal = False
++        self.sliding_window = (
++            config.sliding_window
++            if config.layer_types[layer_idx] == "sliding_attention"
++            else None
++        )
++        self._init_projections(config, kernels)
++        for attribute in ("scaling", "num_key_value_groups", "o_proj"):
++            assert hasattr(
++                self, attribute
++            ), f"_init_projections must define {attribute}"
++
++    def _init_projections(self, config: Qwen3Config, kernels: BackboneKernels) -> None:
++        raise NotImplementedError
++
++    def _compute_qkv(
++        self,
++        hidden_states: torch.Tensor,
++        target_hidden: torch.Tensor,
++        position_embeddings: tuple[torch.Tensor, torch.Tensor],
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
++        raise NotImplementedError
++
++
++class AttentionForward:
++    def forward(
++        self, draft_hidden_states, context_hidden_states, position_embeddings, inputs
++    ):
++        query_states, key_states, value_states = self._compute_qkv(
++            draft_hidden_states, context_hidden_states, position_embeddings
++        )
++        context_length = context_hidden_states.size(1)
++        batch_size = draft_hidden_states.size(0)
++        positions = inputs.context_position_ids
++        if positions is None:
++            positions = torch.arange(
++                context_length, device=draft_hidden_states.device
++            ).expand(batch_size, -1)
++        valid = inputs.context_valid_mask
++        if valid is None:
++            valid = torch.ones_like(positions, dtype=torch.bool)
++        documents = inputs.document_ids
++        if documents is None:
++            documents = torch.zeros_like(positions)
++        context_key_states, context_value_states = (
++            key_states[:, :, :context_length],
++            value_states[:, :, :context_length],
++        )
++        if inputs.draft_state is not None:
++            previous = inputs.draft_state.layers.get(self.layer_idx)
++            if previous is not None:
++                # Caller supplies only new confirmed context; duplicates are rejected.
++                if (
++                    context_length
++                    and previous.positions.numel()
++                    and (
++                        positions[:, :1]
++                        <= previous.positions.masked_fill(~previous.valid, -1).amax(
++                            -1, keepdim=True
++                        )
++                    ).any()
++                ):
++                    raise ValueError(
++                        "Cached forward requires strictly new confirmed context positions"
++                    )
++                context_key_states = torch.cat(
++                    (previous.key_states, context_key_states), dim=2
++                )
++                context_value_states = torch.cat(
++                    (previous.value_states, context_value_states), dim=2
++                )
++                positions = torch.cat((previous.positions, positions), dim=1)
++                valid = torch.cat((previous.valid, valid), dim=1)
++                documents = torch.cat((previous.document_ids, documents), dim=1)
++            key_states = torch.cat(
++                (context_key_states, key_states[:, :, context_length:]), dim=2
++            )
++            value_states = torch.cat(
++                (context_value_states, value_states[:, :, context_length:]), dim=2
++            )
++            cache_key, cache_value, cache_positions, cache_valid, cache_documents = (
++                context_key_states,
++                context_value_states,
++                positions,
++                valid,
++                documents,
++            )
++            cache_valid = valid & (positions < inputs.anchor_positions[:, :1])
++            if self.window_size is not None:
++                # Compact each sample independently: even ragged batches physically
++                # retain at most W confirmed keys, with absolute positions intact.
++                width = min(self.window_size, positions.size(1))
++                priority = positions.masked_fill(~cache_valid, -1)
++                indices = priority.argsort(dim=1, descending=True)[:, :width]
++                indices = indices.flip(-1)
++                cache_key = context_key_states.gather(
++                    2,
++                    indices[:, None, :, None].expand(
++                        -1, context_key_states.size(1), -1, context_key_states.size(-1)
++                    ),
++                )
++                cache_value = context_value_states.gather(
++                    2,
++                    indices[:, None, :, None].expand(
++                        -1,
++                        context_value_states.size(1),
++                        -1,
++                        context_value_states.size(-1),
++                    ),
++                )
++                cache_positions = positions.gather(1, indices)
++                cache_valid = cache_valid.gather(1, indices)
++                cache_documents = documents.gather(1, indices)
++            inputs.draft_state.layers[self.layer_idx] = LayerState(
++                cache_key.detach(),
++                cache_value.detach(),
++                cache_positions,
++                cache_valid,
++                cache_documents,
++            )
++        if getattr(self, "is_dsa", False) and inputs.selection is not None:
++            from legospec.modeling.draft.composable.backbone.attention.access.dsa import (
++                gather_attention,
++            )
++
++            return gather_attention(
++                self,
++                query_states,
++                key_states,
++                value_states,
++                inputs,
++                positions,
++                valid,
++                documents,
++            )
++        if (
++            inputs.packed_plan is not None
++            and inputs.packed_plan.num_samples > 1
++            and self.backend in ("sdpa", "eager")
++            and not getattr(self, "is_dsa", False)
++        ):
++            return self._segmented_attention(
++                query_states,
++                key_states,
++                value_states,
++                inputs,
++                positions,
++                valid,
++                draft_hidden_states,
++            )
++        if (
++            self.backend == "flex_attention"
++            and inputs.packed_plan is not None
++            and not getattr(self, "is_dsa", False)
++        ):
++            from legospec.modeling.draft.composable.backbone.attention.access.visibility import (
++                indexed_visibility,
++            )
++            from legospec.modeling.draft.composable.backbone.attention.backends.flex import (
++                compile_friendly_flex_attention,
++                create_flex_block_mask,
++                flex_kernel_options,
++            )
++
++            mask_mod, query_visible = indexed_visibility(
++                inputs,
++                positions,
++                valid,
++                documents,
++                draft_hidden_states.size(1),
++                self.window_size,
++                causal_queries=getattr(self, "causal_queries", False),
++            )
++            mask = create_flex_block_mask(
++                mask_mod,
++                B=query_states.size(0),
++                H=None,
++                Q_LEN=query_states.size(2),
++                KV_LEN=key_states.size(2),
++                device=str(query_states.device),
++                backend=self.flex_backend,
++            )
++            output = compile_friendly_flex_attention(
++                query_states,
++                key_states,
++                value_states,
++                block_mask=mask,
++                scale=self.scaling,
++                enable_gqa=True,
++                kernel_options=flex_kernel_options(self.flex_backend),
++            )
++            output = output.transpose(1, 2).reshape(*draft_hidden_states.shape[:2], -1)
++            return self.o_proj(output) * query_visible.transpose(1, 2).to(output.dtype)
++        visibility = self.access(
++            inputs,
++            positions,
++            valid,
++            documents,
++            draft_hidden_states.size(1),
++            **(
++                {"causal_queries": True}
++                if getattr(self, "causal_queries", False)
++                else {}
++            ),
++            **(
++                {"window_size": self.window_size}
++                if self.window_size is not None
++                else {}
++            ),
++        )
++        # CUDA SDPA may return finite zeros for fully masked query rows yet
++        # produce NaN dQ in backward. Give only those unused rows one finite
++        # key, then zero their output below. Legal rows and gradients retain
++        # exactly the original visibility; no index leaves the device.
++        query_visible = visibility.any(-1)
++        safe_visibility = visibility.clone()
++        if visibility.size(-1):
++            safe_visibility[..., 0] |= ~query_visible
++        repeats = query_states.size(1) // key_states.size(1)
++        if repeats != 1:
++            key_states = key_states.repeat_interleave(repeats, dim=1)
++            value_states = value_states.repeat_interleave(repeats, dim=1)
++        if self.backend == "eager":
++            scores = (
++                torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
++            )
++            scores = scores.masked_fill(~safe_visibility, float("-inf"))
++            attention_probabilities = (
++                torch.softmax(scores, dim=-1, dtype=torch.float32)
++                .to(query_states.dtype)
++                .nan_to_num()
++            )
++            attention_probabilities = F.dropout(
++                attention_probabilities,
++                p=self.attention_dropout,
++                training=self.training,
++            )
++            output = torch.matmul(
++                attention_probabilities.to(value_states.dtype), value_states
++            )
++        elif self.backend == "flex_attention":
++            from legospec.modeling.draft.composable.backbone.attention.backends.flex import (
++                FLASH_KV_TILE,
++                FLASH_Q_TILE,
++                TRITON_MASK_TILE,
++                compile_friendly_flex_attention,
++                create_flex_block_mask,
++                flex_kernel_options,
++            )
++
++            q_tile, kv_tile = (
++                (FLASH_Q_TILE, FLASH_KV_TILE)
++                if self.flex_backend.upper() == "FLASH"
++                else (TRITON_MASK_TILE, TRITON_MASK_TILE)
++            )
++            # Block-mask construction visits complete tiles, including padding.
++            # Pad with False so the callback only loads a tensor; querying shapes
++            # inside mask_mod breaks PyTorch 2.9's dynamic FlexAttention lowering.
++            flat_visibility = F.pad(
++                safe_visibility[:, 0],
++                (0, -visibility.size(3) % kv_tile, 0, -visibility.size(2) % q_tile),
++                value=False,
++            )
++
++            def mask_mod(b, h, q, k):
++                return flat_visibility[b, q, k]
++
++            mask = create_flex_block_mask(
++                mask_mod,
++                B=query_states.size(0),
++                H=None,
++                Q_LEN=query_states.size(2),
++                KV_LEN=key_states.size(2),
++                device=str(query_states.device),
++                backend=self.flex_backend,
++            )
++            output = compile_friendly_flex_attention(
++                query_states,
++                key_states,
++                value_states,
++                block_mask=mask,
++                scale=self.scaling,
++                kernel_options=flex_kernel_options(self.flex_backend),
++            )
++        else:
++            output = F.scaled_dot_product_attention(
++                query_states,
++                key_states,
++                value_states,
++                attn_mask=safe_visibility,
++                dropout_p=self.attention_dropout if self.training else 0.0,
++                is_causal=False,
++                scale=self.scaling,
++            )
++        output = output.transpose(1, 2).reshape(*draft_hidden_states.shape[:2], -1)
++        return self.o_proj(output) * query_visible.transpose(1, 2).to(output.dtype)
++
++    def _segmented_attention(
++        self, queries, keys, values, inputs, positions, valid, hidden
++    ):
++        """Avoid a dense cross-document Q×KV allocation in SDPA/eager mode."""
++        outputs = []
++        context_length = positions.size(1)
++        context_start = block_start = 0
++        block_size = hidden.size(1) // inputs.anchor_positions.size(1)
++        for sample in inputs.packed_plan.samples:
++            context_end = context_start + sample.length
++            block_end = block_start + len(sample.anchors)
++            q_start, q_end = block_start * block_size, block_end * block_size
++            if q_end > q_start:
++                query = queries[:, :, q_start:q_end]
++                key = torch.cat(
++                    (
++                        keys[:, :, context_start:context_end],
++                        keys[:, :, context_length + q_start : context_length + q_end],
++                    ),
++                    dim=2,
++                )
++                value = torch.cat(
++                    (
++                        values[:, :, context_start:context_end],
++                        values[:, :, context_length + q_start : context_length + q_end],
++                    ),
++                    dim=2,
++                )
++                anchor = inputs.anchor_positions[
++                    :, block_start:block_end
++                ].repeat_interleave(block_size, 1)
++                live = inputs.block_keep_mask[
++                    :, block_start:block_end
++                ].repeat_interleave(block_size, 1)
++                pos = positions[:, None, context_start:context_end]
++                context = (pos < anchor[..., None]) & valid[
++                    :, None, context_start:context_end
++                ]
++                if self.window_size is not None:
++                    context &= pos >= anchor[..., None] - self.window_size
++                slots = torch.arange(q_end - q_start, device=query.device)
++                own = slots[:, None] // block_size == slots[None] // block_size
++                if getattr(self, "causal_queries", False):
++                    own &= slots[:, None] >= slots[None]
++                current = own[None] & live[:, None]
++                mask = (
++                    torch.cat((context, current), -1)[:, None] & live[:, None, :, None]
++                )
++                mask[..., 0] |= ~live[:, None]
++                # Arbitrary-mask SDPA GQA may fall back to the quadratic math
++                # kernel. Keep its established equal-head fused-kernel path;
++                # native GQA is used by the indexed Flex implementation above.
++                repeats = query.size(1) // key.size(1)
++                if repeats != 1:
++                    key, value = (
++                        key.repeat_interleave(repeats, 1),
++                        value.repeat_interleave(repeats, 1),
++                    )
++                if self.backend == "sdpa":
++                    output = F.scaled_dot_product_attention(
++                        query,
++                        key,
++                        value,
++                        attn_mask=mask,
++                        dropout_p=self.attention_dropout if self.training else 0.0,
++                        scale=self.scaling,
++                    )
++                else:
++                    scores = (query @ key.transpose(-2, -1)) * self.scaling
++                    probability = (
++                        scores.masked_fill(~mask, float("-inf"))
++                        .softmax(-1, dtype=torch.float32)
++                        .to(query.dtype)
++                    )
++                    probability = F.dropout(
++                        probability, p=self.attention_dropout, training=self.training
++                    )
++                    output = probability @ value
++                outputs.append(output * live[:, None, :, None].to(output.dtype))
++            context_start, block_start = context_end, block_end
++        output = (
++            torch.cat(outputs, dim=2).transpose(1, 2).reshape(*hidden.shape[:2], -1)
++        )
++        live = inputs.block_keep_mask.repeat_interleave(block_size, 1)[..., None]
++        return self.o_proj(output) * live.to(output.dtype)
+--- before/legospec/modeling/draft/composable/backbone/attention/DESIGN.md
++++ after/legospec/modeling/draft/composable/backbone/attention/DESIGN.md
+@@ -7,7 +7,7 @@
+ ├── __init__.py       现有 dense/latent 构建入口
+ ├── dense.py          MHA/GQA/MQA 投影与 attention
+ ├── latent.py         MLA 投影、展开训练、吸收推理与 latent cache
+-├── softmax.py        dense/latent 共用的 KV 提交与 softmax 执行
++├── base.py        dense/latent 共用的 KV 提交与 softmax 执行
+ ├── linear/
+ │   ├── recurrence.py GDN/KDA 递归计算、read/write 与内部卷积
+ │   ├── block.py      linear 内部共享投影、逐头 gate block attention
+@@ -23,8 +23,8 @@
+ ```
+ 
+ MHA/GQA/MQA 共用 GQAAttention；MLA 的全部投影与 RoPE 逻辑留在 latent.py。
+-softmax.py 只保留这两类真实共用的 scaffold、缓存与执行，不存放某一家族的投影。
+-linear/ 内 GDN/KDA 共用 GDNContextMemoryMixer，KDA 使用逐 key 通道 decay。
++base.py 只保留这两类真实共用的 scaffold、缓存与执行，不存放某一家族的投影。
++linear/ 内 _LinearAttention 负责构建与融合，GDN/KDA 共用 GDNContextMemoryMixer 历史读出，KDA 使用逐 key 通道 decay。
+ block.py 是 linear 内部数学，公共配方不提供独立 block attention 开关。
+ access/ 同时服务 dense 和 latent；backends/ 是可选执行依赖，不负责模型分类。
+ 这些子目录仅承载实现，不引入转发 wrapper、独立算法模型或新的类注册层。
+@@ -37,3 +37,5 @@
+ 内部 Python import 路径统一迁移，没有保留旧文件的转发壳。旧 checkpoint 权重与原始配方按原语义读取。
+ 回归见 tests/unit/test_attention_taxonomy.py、test_mla_absorb.py、test_gdn_shared_block_attention.py；
+ 迁移前后逐位一致性证据位于 tests/attention_layout_20261122/。
++
++本轮所有权收敛的数值、缓存和优化器参数顺序对照见 tests/linear_ownership_20261122/。
+--- before/legospec/modeling/draft/composable/backbone/attention/dense.py
++++ after/legospec/modeling/draft/composable/backbone/attention/dense.py
+@@ -6,7 +6,7 @@
+ from torch.nn import functional as F
+ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, rotate_half
+ from legospec.modeling.draft.composable.backbone.kernels import BackboneKernels
+-from legospec.modeling.draft.composable.backbone.attention.softmax import (
++from legospec.modeling.draft.composable.backbone.attention.base import (
+     AttentionBase,
+     AttentionForward,
+ )
+--- before/legospec/modeling/draft/composable/backbone/attention/latent.py
++++ after/legospec/modeling/draft/composable/backbone/attention/latent.py
+@@ -7,7 +7,7 @@
+ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, rotate_half
+ from legospec.modeling.draft.composable.backbone.kernels import BackboneKernels
+ from legospec.modeling.draft.composable.contracts import MLALayerState
+-from legospec.modeling.draft.composable.backbone.attention.softmax import (
++from legospec.modeling.draft.composable.backbone.attention.base import (
+     AttentionBase,
+     AttentionForward,
+ )
+--- before/tests/unit/test_mla_absorb.py
++++ after/tests/unit/test_mla_absorb.py
+@@ -4,7 +4,7 @@
+ import torch
+ from transformers import Qwen3Config
+ from legospec.modeling.draft.composable.backbone.attention.latent import MLAAttention
+-from legospec.modeling.draft.composable.backbone.attention.softmax import (
++from legospec.modeling.draft.composable.backbone.attention.base import (
+     AttentionForward,
+ )
+ from legospec.modeling.draft.composable.backbone.kernels import DEFAULT_KERNELS
+--- before/legospec/modeling/draft/composable/backbone/attention/linear/recurrence.py
++++ after/legospec/modeling/draft/composable/backbone/attention/linear/recurrence.py
+@@ -14,6 +14,10 @@
+ import torch
+ from torch import nn
+ from torch.nn import functional as F
++
++from legospec.modeling.draft.composable.backbone.attention.linear.block import (
++    GatedBlockAttention,
++)
+ 
+ from legospec.modeling.draft.composable.backbone.attention.linear.cache import (
+     GDNLayerState,
+@@ -226,7 +230,6 @@
+         *,
+         inputs=None,
+         query_context=None,
+-        block_attention=None,
+     ):
+         n, length, _ = hidden.shape
+         a = length // block_size
+@@ -355,17 +358,6 @@
+             )
+             final = None
+         out = self.norm(out.reshape(n, length, self.hv, self.dv), z)
+-        if block_attention is not None:
+-            # Q is projected and query-convolved once for both reads. The GDN
+-            # kernel retains its Q/K L2 normalization; SDPA retains its scaling.
+-            # Context and block K/V share weights but have different inputs.
+-            block = block_attention(
+-                hidden,
+-                query=q.reshape(n, length, self.hk, self.dk),
+-                key_value=self.in_proj_kv(hidden),
+-            )
+-            out = out + block.reshape(n, length, self.hv, self.dv)
+-        result = self.out_proj(out.flatten(-2))
+         state = None
+         if previous is not None:
+             state = GDNLayerState(
+@@ -374,4 +366,95 @@
+                 self.context_kernel,
+                 q_tail,
+             )
+-        return result, state
++        return out, q.reshape(n, length, self.hk, self.dk), state
++
++
++class _LinearAttention:
++    """Own linear construction and fusion on Layer's existing parameter namespace.
++
++    This behavior has no separate module registration: keeping mixer/block/position
++    names and traversal order preserves saved weights and optimizer resume layouts.
++    Legacy graph selection happens once here, never in Layer.forward.
++    """
++
++    def _init_linear_attention(self, config, recipe):
++        self.position_embedding = nn.Embedding(config.block_size, config.hidden_size)
++        linear = recipe["gdn_config"]
++        self.mixer = GDNContextMemoryMixer(config, linear)
++        if linear.get("intrinsic_block_attention"):
++            block = dict(
++                share_gdn_projections=True,
++                num_heads=linear["linear_num_value_heads"],
++                head_dim=linear["linear_key_head_dim"],
++                gate_init=linear["gate_init"],
++            )
++        else:
++            # Original string recipes alone may omit the block or use separate QKVO.
++            block = recipe.get("block_attention")
++        self.block_attention = (
++            GatedBlockAttention(
++                config.hidden_size, config.block_size, block, gdn_config=linear
++            )
++            if block is not None
++            else None
++        )
++        self._linear_forward = (
++            self._shared_linear_attention
++            if self.block_attention is not None
++            and self.block_attention.share_gdn_projections
++            else self._legacy_linear_attention
++        )
++
++    def _linear_positions(self, hidden):
++        batch, length, width = hidden.shape
++        return (
++            hidden.reshape(batch, -1, self.block_size, width)
++            + self.position_embedding.weight
++        ).reshape(batch, length, width)
++
++    def _read_linear_attention(self, hidden, context, inputs, layout, previous):
++        coefficients = None
++        if self.attention_conv is not None:
++            hidden, coefficients = self.attention_conv.prepare(hidden)
++        query_context = (
++            self.input_norm(context)
++            if self.mixer.q_mode == "confirmed_history"
++            else None
++        )
++        history, query, state = self.mixer(
++            hidden,
++            context,
++            layout,
++            self.block_size,
++            previous,
++            inputs=inputs,
++            query_context=query_context,
++        )
++        return hidden, history, query, state, coefficients
++
++    def _shared_linear_attention(self, hidden, context, inputs, layout, previous):
++        # Fixed current graph: history read + per-head gated block read, then one O.
++        hidden, history, query, state, coefficients = self._read_linear_attention(
++            hidden, context, inputs, layout, previous
++        )
++        block = self.block_attention(
++            hidden, query=query, key_value=self.mixer.in_proj_kv(hidden)
++        )
++        output = self.mixer.out_proj((history + block.reshape_as(history)).flatten(-2))
++        if self.attention_conv is not None:
++            output = self.attention_conv.finish(output, coefficients)
++        return output, state
++
++    def _legacy_linear_attention(self, hidden, context, inputs, layout, previous):
++        # Preserve old independent-branch ordering: finish external conv first,
++        # then add the block computed from the original normalized input.
++        block_input = hidden
++        _, history, _, state, coefficients = self._read_linear_attention(
++            hidden, context, inputs, layout, previous
++        )
++        output = self.mixer.out_proj(history.flatten(-2))
++        if self.attention_conv is not None:
++            output = self.attention_conv.finish(output, coefficients)
++        if self.block_attention is not None:
++            output = output + self.block_attention(block_input)
++        return output, state
+--- before/legospec/modeling/draft/composable/backbone/model.py
++++ after/legospec/modeling/draft/composable/backbone/model.py
+@@ -8,11 +8,8 @@
+ from torch.utils.checkpoint import checkpoint
+ from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
+ from legospec.modeling.draft.composable.contracts import BackboneOutput
+-from legospec.modeling.draft.composable.backbone.attention.linear.block import (
+-    GatedBlockAttention,
+-)
+ from legospec.modeling.draft.composable.backbone.attention.linear.recurrence import (
+-    GDNContextMemoryMixer,
++    _LinearAttention,
+ )
+ from legospec.modeling.draft.composable.backbone.attention.linear.events import (
+     build_event_layout,
+@@ -27,7 +24,7 @@
+ )
+ 
+ 
+-class Layer(nn.Module):
++class Layer(_LinearAttention, nn.Module):
+     def __init__(self, config, layer_idx, recipe):
+         super().__init__()
+         kernels = DEFAULT_KERNELS
+@@ -37,31 +34,7 @@
+         )
+         self.recurrent = recipe["attention"]["representation"] in ("gdn", "kda")
+         if self.recurrent:
+-            self.position_embedding = nn.Embedding(
+-                config.block_size, config.hidden_size
+-            )
+-            self.mixer = GDNContextMemoryMixer(config, recipe["gdn_config"])
+-            linear = recipe["gdn_config"]
+-            block = (
+-                dict(
+-                    share_gdn_projections=True,
+-                    num_heads=linear["linear_num_value_heads"],
+-                    head_dim=linear["linear_key_head_dim"],
+-                    gate_init=linear["gate_init"],
+-                )
+-                if linear.get("intrinsic_block_attention")
+-                else recipe.get("block_attention")
+-            )
+-            self.block_attention = (
+-                GatedBlockAttention(
+-                    config.hidden_size,
+-                    self.block_size,
+-                    block,
+-                    gdn_config=recipe["gdn_config"],
+-                )
+-                if block is not None
+-                else None
+-            )
++            self._init_linear_attention(config, recipe)
+         else:
+             local = deepcopy(config)
+             if self.input_fusion == "concat_hidden":
+@@ -150,11 +123,7 @@
+             )
+         state = teacher = None
+         if self.recurrent:
+-            batch, length, width = draft_hidden_states.shape
+-            draft_hidden_states = (
+-                draft_hidden_states.reshape(batch, -1, self.block_size, width)
+-                + self.position_embedding.weight
+-            ).reshape(batch, length, width)
++            draft_hidden_states = self._linear_positions(draft_hidden_states)
+         else:
+             positions = inputs.context_position_ids
+             if positions is None:
+@@ -170,46 +139,25 @@
+             )
+         residual = draft_hidden_states
+         draft_hidden_states = self.input_norm(draft_hidden_states)
+-        block_input = draft_hidden_states
+-        coefficients = None
+-        if self.attention_conv is not None:
+-            draft_hidden_states, coefficients = self.attention_conv.prepare(
+-                draft_hidden_states
+-            )
+         if self.recurrent:
+-            query_context = (
+-                self.input_norm(context_hidden_states)
+-                if self.mixer.q_mode == "confirmed_history"
+-                else None
+-            )
+-            shared = (
+-                self.block_attention is not None
+-                and self.block_attention.share_gdn_projections
+-            )
+-            draft_hidden_states, state = self.mixer(
+-                draft_hidden_states,
+-                context_hidden_states,
+-                layout,
+-                self.block_size,
+-                previous,
+-                inputs=inputs,
+-                query_context=query_context,
+-                block_attention=self.block_attention if shared else None,
++            draft_hidden_states, state = self._linear_forward(
++                draft_hidden_states, context_hidden_states, inputs, layout, previous
+             )
+         else:
++            coefficients = None
++            if self.attention_conv is not None:
++                draft_hidden_states, coefficients = self.attention_conv.prepare(
++                    draft_hidden_states
++                )
+             draft_hidden_states = self.self_attn(
+                 draft_hidden_states, context_hidden_states, embeddings, inputs
+             )
+             if isinstance(draft_hidden_states, tuple):
+                 draft_hidden_states, teacher = draft_hidden_states
+-        if self.attention_conv is not None:
+-            draft_hidden_states = self.attention_conv.finish(
+-                draft_hidden_states, coefficients
+-            )
+-        if self.recurrent and self.block_attention is not None and not shared:
+-            draft_hidden_states = draft_hidden_states + self.block_attention(
+-                block_input
+-            )
++            if self.attention_conv is not None:
++                draft_hidden_states = self.attention_conv.finish(
++                    draft_hidden_states, coefficients
++                )
+         draft_hidden_states = residual + draft_hidden_states
+         residual = draft_hidden_states
+         draft_hidden_states = self.post_attention_norm(draft_hidden_states)
+--- before/legospec/modeling/draft/composable/backbone/attention/linear/DESIGN.md
++++ after/legospec/modeling/draft/composable/backbone/attention/linear/DESIGN.md
+@@ -1,5 +1,17 @@
+ # Linear attention
+ 
+-recurrence.py 拥有 GDN/KDA 的投影、内部卷积、gate decay 与 scan；block.py 拥有其内部共享投影 block attention。
+-events.py 是两者共同使用的读写事件布局，cache.py 将状态类型和前缀提交放在一起。
+-消费方为统一 Backbone/Layer；状态类型还供 contracts 的类型标注使用。不得在此引入 MLP、残差或 Proposal。
++recurrence.py 拥有 GDN/KDA 的投影、内部卷积、decay、scan 和完整 linear 调用。
++`_LinearAttention` 提供实际构建、位置编码和融合实现，Layer 通过继承使用这些行为，
++保留原有 position_embedding/mixer/block_attention 的参数注册路径和遍历顺序；
++没有新增一层 nn.Module 嵌套或 checkpoint key 转换。
++
++新配方固定执行历史 read + shared block attention + 逐头 gate + 单次 O 投影。
++GDNContextMemoryMixer 返回每头历史读出、共享 Q 和状态，调用方只在 linear 内完成融合。
++Layer.forward 不检查 block 的有无/共享方式，不接收或传递 block module。
++历史无 block、独立 QKVO 两种配方在构建时选中 _legacy_linear_attention；
++block.py 的独立 QKVO 也在构建时绑定旧 forward，不混入新的共享 forward。
++历史独立分支维持外部卷积 finish 后再相加的顺序。
++
++block.py 拥有 gated SDPA 数学，events.py 拥有读写布局，cache.py 拥有状态和前缀提交。
++Layer 保留 norm、残差、MLP 与外部卷积参数注册；linear 负责其 attention 路径内的卷积执行顺序。
++不得在此引入 Proposal 或另一套训练入口。
+--- before/legospec/modeling/draft/composable/backbone/DESIGN.md
++++ after/legospec/modeling/draft/composable/backbone/DESIGN.md
+@@ -5,3 +5,5 @@
+ 当前文件：`convolution.py`, `kernels.py`, `model.py`
+ 
+ 修改要求：共享组件不反向导入具体算法；输入在边界校验；不为单次转发增加 wrapper。数学与缓存语义变化必须有前向、梯度或状态回归测试。
++
++Linear 的构建、位置编码、共享 block 融合和 O 投影集中于 attention/linear/recurrence.py；Layer 保留通用 norm/残差/MLP。旧分支在构建时选择，参数注册路径保持不变。
+--- before/docs/COMPONENT_ORGANIZATION.md
++++ after/docs/COMPONENT_ORGANIZATION.md
+@@ -22,3 +22,5 @@
+ 完整 resume 必须使用原训练配置与 rank topology，并恢复 optimizer、scheduler、FP32 master、每 rank RNG 和 cursor；weights-only 仅用于推理或 init_from。
+ 
+ 修改只针对公共迭代目录，训练中的源码快照、cache、checkpoint、model_publish 权重与原生 config 不参与迁移。
++
++Linear 的构建、位置编码、共享 block 融合和 O 投影集中于 attention/linear/recurrence.py；Layer 保留通用 norm/残差/MLP。旧分支在构建时选择，参数注册路径保持不变。
+--- before/legospec/modeling/draft/composable/backbone/attention/linear/block.py
++++ after/legospec/modeling/draft/composable/backbone/attention/linear/block.py
+@@ -29,6 +29,7 @@
+         if not self.share_gdn_projections:
+             self.qkv_proj = nn.Linear(hidden_size, 3 * self.width, bias=False)
+             self.out_proj = nn.Linear(self.width, hidden_size, bias=False)
++            self.forward = self._legacy_forward
+         self.gate_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
+         self.reset_gate_parameters()
+ 
+@@ -40,33 +41,41 @@
+         )
+ 
+     def forward(self, hidden, *, query=None, key_value=None):
++        """Current shared-QKVO path; the legacy graph is selected at construction."""
+         n, length, hidden_size = hidden.shape
+         blocks = hidden.reshape(-1, self.block_size, hidden_size)
+-        if self.share_gdn_projections:
+-            if query is None or key_value is None:
+-                raise ValueError("Shared block_attention requires projected Q and K/V")
+-            key_dim = self.num_key_heads * self.head_dim
+-            q = query.reshape(
+-                -1, self.block_size, self.num_key_heads, self.head_dim
+-            ).transpose(1, 2)
+-            k, v = key_value.split((key_dim, self.width), dim=-1)
+-            k = k.reshape(
+-                -1, self.block_size, self.num_key_heads, self.head_dim
+-            ).transpose(1, 2)
+-            v = v.reshape(
+-                -1, self.block_size, self.num_heads, self.value_head_dim
+-            ).transpose(1, 2)
+-            # Grouped value attention: each Q/K head serves consecutive V heads.
+-            repeat = self.num_heads // self.num_key_heads
+-            if repeat != 1:
+-                q = q.repeat_interleave(repeat, dim=1)
+-                k = k.repeat_interleave(repeat, dim=1)
+-        else:
+-            qkv = self.qkv_proj(blocks).reshape(
+-                blocks.size(0), self.block_size, 3, self.num_heads, self.head_dim
+-            )
+-            q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
+-        # Folding anchors into the batch makes cross-block access impossible.
++        if query is None or key_value is None:
++            raise ValueError("Shared block_attention requires projected Q and K/V")
++        key_dim = self.num_key_heads * self.head_dim
++        q = query.reshape(
++            -1, self.block_size, self.num_key_heads, self.head_dim
++        ).transpose(1, 2)
++        k, v = key_value.split((key_dim, self.width), dim=-1)
++        k = k.reshape(-1, self.block_size, self.num_key_heads, self.head_dim).transpose(
++            1, 2
++        )
++        v = v.reshape(
++            -1, self.block_size, self.num_heads, self.value_head_dim
++        ).transpose(1, 2)
++        repeat = self.num_heads // self.num_key_heads
++        if repeat != 1:
++            q = q.repeat_interleave(repeat, dim=1)
++            k = k.repeat_interleave(repeat, dim=1)
++        return self._attend(blocks, q, k, v).flatten(-2).reshape(n, length, self.width)
++
++    def _legacy_forward(self, hidden, *, query=None, key_value=None):
++        """Original independently projected Q/K/V/O, for old string recipes only."""
++        n, length, hidden_size = hidden.shape
++        blocks = hidden.reshape(-1, self.block_size, hidden_size)
++        qkv = self.qkv_proj(blocks).reshape(
++            blocks.size(0), self.block_size, 3, self.num_heads, self.head_dim
++        )
++        q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
++        output = self._attend(blocks, q, k, v)
++        return self.out_proj(output.flatten(-2)).reshape(n, length, hidden_size)
++
++    def _attend(self, blocks, q, k, v):
++        # Folding anchors into the batch prevents cross-block attention.
+         output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+         output = output.transpose(1, 2)
+         gates = (
+@@ -78,7 +87,4 @@
+             .sigmoid()
+             .to(output.dtype)
+         )
+-        output = output * gates[..., None]
+-        if self.share_gdn_projections:
+-            return output.flatten(-2).reshape(n, length, self.width)
+-        return self.out_proj(output.flatten(-2)).reshape(n, length, hidden_size)
++        return output * gates[..., None]
+--- before/legospec/modeling/draft/composable/backbone/attention/softmax.py
++++ after/legospec/modeling/draft/composable/backbone/attention/softmax.py
+@@ -1,418 +0,0 @@
+-"""Shared dense/latent attention lifecycle: projections, KV commit and execution."""
+-
+-import torch
+-from torch import nn
+-from torch.nn import functional as F
+-from transformers.models.qwen3.modeling_qwen3 import Qwen3Config
+-from legospec.modeling.draft.composable.backbone.kernels import BackboneKernels
+-from legospec.modeling.draft.composable.contracts import LayerState
+-
+-
+-class AttentionBase(nn.Module):
+-    """Shared scaffold for the DFlash-family attention modes.
+-
+-    Subclasses own only the projection parameterization: ``_init_projections``
+-    builds the weights and must define ``scaling``, ``num_key_value_groups``,
+-    and ``o_proj`` (the shared forward relies on them); ``_compute_qkv``
+-    returns rotated ``(q, k, v)`` in ``(batch, heads, seq, dim)`` layout with
+-    keys ordered context-then-draft. Everything the modes must agree on —
+-    KV-cache updates, backend dispatch, fully-masked-query zeroing, and the
+-    output projection — lives here so it is maintained in exactly one place.
+-    """
+-
+-    def __init__(
+-        self,
+-        config: Qwen3Config,
+-        layer_idx: int,
+-        kernels: BackboneKernels,
+-    ):
+-        super().__init__()
+-        self.config = config
+-        self.layer_idx = layer_idx
+-        self.attention_dropout = config.attention_dropout
+-        if config._attn_implementation == "flex_attention":
+-            assert (
+-                config.attention_dropout == 0.0
+-            ), "DFlash FlexAttention requires attention_dropout=0.0"
+-        self.is_causal = False
+-        self.sliding_window = (
+-            config.sliding_window
+-            if config.layer_types[layer_idx] == "sliding_attention"
+-            else None
+-        )
+-        self._init_projections(config, kernels)
+-        for attribute in ("scaling", "num_key_value_groups", "o_proj"):
+-            assert hasattr(
+-                self, attribute
+-            ), f"_init_projections must define {attribute}"
+-
+-    def _init_projections(self, config: Qwen3Config, kernels: BackboneKernels) -> None:
+-        raise NotImplementedError
+-
+-    def _compute_qkv(
+-        self,
+-        hidden_states: torch.Tensor,
+-        target_hidden: torch.Tensor,
+-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+-        raise NotImplementedError
+-
+-
+-class AttentionForward:
+-    def forward(
+-        self, draft_hidden_states, context_hidden_states, position_embeddings, inputs
+-    ):
+-        query_states, key_states, value_states = self._compute_qkv(
+-            draft_hidden_states, context_hidden_states, position_embeddings
+-        )
+-        context_length = context_hidden_states.size(1)
+-        batch_size = draft_hidden_states.size(0)
+-        positions = inputs.context_position_ids
+-        if positions is None:
+-            positions = torch.arange(
+-                context_length, device=draft_hidden_states.device
+-            ).expand(batch_size, -1)
+-        valid = inputs.context_valid_mask
+-        if valid is None:
+-            valid = torch.ones_like(positions, dtype=torch.bool)
+-        documents = inputs.document_ids
+-        if documents is None:
+-            documents = torch.zeros_like(positions)
+-        context_key_states, context_value_states = (
+-            key_states[:, :, :context_length],
+-            value_states[:, :, :context_length],
+-        )
+-        if inputs.draft_state is not None:
+-            previous = inputs.draft_state.layers.get(self.layer_idx)
+-            if previous is not None:
+-                # Caller supplies only new confirmed context; duplicates are rejected.
+-                if (
+-                    context_length
+-                    and previous.positions.numel()
+-                    and (
+-                        positions[:, :1]
+-                        <= previous.positions.masked_fill(~previous.valid, -1).amax(
+-                            -1, keepdim=True
+-                        )
+-                    ).any()
+-                ):
+-                    raise ValueError(
+-                        "Cached forward requires strictly new confirmed context positions"
+-                    )
+-                context_key_states = torch.cat(
+-                    (previous.key_states, context_key_states), dim=2
+-                )
+-                context_value_states = torch.cat(
+-                    (previous.value_states, context_value_states), dim=2
+-                )
+-                positions = torch.cat((previous.positions, positions), dim=1)
+-                valid = torch.cat((previous.valid, valid), dim=1)
+-                documents = torch.cat((previous.document_ids, documents), dim=1)
+-            key_states = torch.cat(
+-                (context_key_states, key_states[:, :, context_length:]), dim=2
+-            )
+-            value_states = torch.cat(
+-                (context_value_states, value_states[:, :, context_length:]), dim=2
+-            )
+-            cache_key, cache_value, cache_positions, cache_valid, cache_documents = (
+-                context_key_states,
+-                context_value_states,
+-                positions,
+-                valid,
+-                documents,
+-            )
+-            cache_valid = valid & (positions < inputs.anchor_positions[:, :1])
+-            if self.window_size is not None:
+-                # Compact each sample independently: even ragged batches physically
+-                # retain at most W confirmed keys, with absolute positions intact.
+-                width = min(self.window_size, positions.size(1))
+-                priority = positions.masked_fill(~cache_valid, -1)
+-                indices = priority.argsort(dim=1, descending=True)[:, :width]
+-                indices = indices.flip(-1)
+-                cache_key = context_key_states.gather(
+-                    2,
+-                    indices[:, None, :, None].expand(
+-                        -1, context_key_states.size(1), -1, context_key_states.size(-1)
+-                    ),
+-                )
+-                cache_value = context_value_states.gather(
+-                    2,
+-                    indices[:, None, :, None].expand(
+-                        -1,
+-                        context_value_states.size(1),
+-                        -1,
+-                        context_value_states.size(-1),
+-                    ),
+-                )
+-                cache_positions = positions.gather(1, indices)
+-                cache_valid = cache_valid.gather(1, indices)
+-                cache_documents = documents.gather(1, indices)
+-            inputs.draft_state.layers[self.layer_idx] = LayerState(
+-                cache_key.detach(),
+-                cache_value.detach(),
+-                cache_positions,
+-                cache_valid,
+-                cache_documents,
+-            )
+-        if getattr(self, "is_dsa", False) and inputs.selection is not None:
+-            from legospec.modeling.draft.composable.backbone.attention.access.dsa import (
+-                gather_attention,
+-            )
+-
+-            return gather_attention(
+-                self,
+-                query_states,
+-                key_states,
+-                value_states,
+-                inputs,
+-                positions,
+-                valid,
+-                documents,
+-            )
+-        if (
+-            inputs.packed_plan is not None
+-            and inputs.packed_plan.num_samples > 1
+-            and self.backend in ("sdpa", "eager")
+-            and not getattr(self, "is_dsa", False)
+-        ):
+-            return self._segmented_attention(
+-                query_states,
+-                key_states,
+-                value_states,
+-                inputs,
+-                positions,
+-                valid,
+-                draft_hidden_states,
+-            )
+-        if (
+-            self.backend == "flex_attention"
+-            and inputs.packed_plan is not None
+-            and not getattr(self, "is_dsa", False)
+-        ):
+-            from legospec.modeling.draft.composable.backbone.attention.access.visibility import (
+-                indexed_visibility,
+-            )
+-            from legospec.modeling.draft.composable.backbone.attention.backends.flex import (
+-                compile_friendly_flex_attention,
+-                create_flex_block_mask,
+-                flex_kernel_options,
+-            )
+-
+-            mask_mod, query_visible = indexed_visibility(
+-                inputs,
+-                positions,
+-                valid,
+-                documents,
+-                draft_hidden_states.size(1),
+-                self.window_size,
+-                causal_queries=getattr(self, "causal_queries", False),
+-            )
+-            mask = create_flex_block_mask(
+-                mask_mod,
+-                B=query_states.size(0),
+-                H=None,
+-                Q_LEN=query_states.size(2),
+-                KV_LEN=key_states.size(2),
+-                device=str(query_states.device),
+-                backend=self.flex_backend,
+-            )
+-            output = compile_friendly_flex_attention(
+-                query_states,
+-                key_states,
+-                value_states,
+-                block_mask=mask,
+-                scale=self.scaling,
+-                enable_gqa=True,
+-                kernel_options=flex_kernel_options(self.flex_backend),
+-            )
+-            output = output.transpose(1, 2).reshape(*draft_hidden_states.shape[:2], -1)
+-            return self.o_proj(output) * query_visible.transpose(1, 2).to(output.dtype)
+-        visibility = self.access(
+-            inputs,
+-            positions,
+-            valid,
+-            documents,
+-            draft_hidden_states.size(1),
+-            **(
+-                {"causal_queries": True}
+-                if getattr(self, "causal_queries", False)
+-                else {}
+-            ),
+-            **(
+-                {"window_size": self.window_size}
+-                if self.window_size is not None
+-                else {}
+-            ),
+-        )
+-        # CUDA SDPA may return finite zeros for fully masked query rows yet
+-        # produce NaN dQ in backward. Give only those unused rows one finite
+-        # key, then zero their output below. Legal rows and gradients retain
+-        # exactly the original visibility; no index leaves the device.
+-        query_visible = visibility.any(-1)
+-        safe_visibility = visibility.clone()
+-        if visibility.size(-1):
+-            safe_visibility[..., 0] |= ~query_visible
+-        repeats = query_states.size(1) // key_states.size(1)
+-        if repeats != 1:
+-            key_states = key_states.repeat_interleave(repeats, dim=1)
+-            value_states = value_states.repeat_interleave(repeats, dim=1)
+-        if self.backend == "eager":
+-            scores = (
+-                torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
+-            )
+-            scores = scores.masked_fill(~safe_visibility, float("-inf"))
+-            attention_probabilities = (
+-                torch.softmax(scores, dim=-1, dtype=torch.float32)
+-                .to(query_states.dtype)
+-                .nan_to_num()
+-            )
+-            attention_probabilities = F.dropout(
+-                attention_probabilities,
+-                p=self.attention_dropout,
+-                training=self.training,
+-            )
+-            output = torch.matmul(
+-                attention_probabilities.to(value_states.dtype), value_states
+-            )
+-        elif self.backend == "flex_attention":
+-            from legospec.modeling.draft.composable.backbone.attention.backends.flex import (
+-                FLASH_KV_TILE,
+-                FLASH_Q_TILE,
+-                TRITON_MASK_TILE,
+-                compile_friendly_flex_attention,
+-                create_flex_block_mask,
+-                flex_kernel_options,
+-            )
+-
+-            q_tile, kv_tile = (
+-                (FLASH_Q_TILE, FLASH_KV_TILE)
+-                if self.flex_backend.upper() == "FLASH"
+-                else (TRITON_MASK_TILE, TRITON_MASK_TILE)
+-            )
+-            # Block-mask construction visits complete tiles, including padding.
+-            # Pad with False so the callback only loads a tensor; querying shapes
+-            # inside mask_mod breaks PyTorch 2.9's dynamic FlexAttention lowering.
+-            flat_visibility = F.pad(
+-                safe_visibility[:, 0],
+-                (0, -visibility.size(3) % kv_tile, 0, -visibility.size(2) % q_tile),
+-                value=False,
+-            )
+-
+-            def mask_mod(b, h, q, k):
+-                return flat_visibility[b, q, k]
+-
+-            mask = create_flex_block_mask(
+-                mask_mod,
+-                B=query_states.size(0),
+-                H=None,
+-                Q_LEN=query_states.size(2),
+-                KV_LEN=key_states.size(2),
+-                device=str(query_states.device),
+-                backend=self.flex_backend,
+-            )
+-            output = compile_friendly_flex_attention(
+-                query_states,
+-                key_states,
+-                value_states,
+-                block_mask=mask,
+-                scale=self.scaling,
+-                kernel_options=flex_kernel_options(self.flex_backend),
+-            )
+-        else:
+-            output = F.scaled_dot_product_attention(
+-                query_states,
+-                key_states,
+-                value_states,
+-                attn_mask=safe_visibility,
+-                dropout_p=self.attention_dropout if self.training else 0.0,
+-                is_causal=False,
+-                scale=self.scaling,
+-            )
+-        output = output.transpose(1, 2).reshape(*draft_hidden_states.shape[:2], -1)
+-        return self.o_proj(output) * query_visible.transpose(1, 2).to(output.dtype)
+-
+-    def _segmented_attention(
+-        self, queries, keys, values, inputs, positions, valid, hidden
+-    ):
+-        """Avoid a dense cross-document Q×KV allocation in SDPA/eager mode."""
+-        outputs = []
+-        context_length = positions.size(1)
+-        context_start = block_start = 0
+-        block_size = hidden.size(1) // inputs.anchor_positions.size(1)
+-        for sample in inputs.packed_plan.samples:
+-            context_end = context_start + sample.length
+-            block_end = block_start + len(sample.anchors)
+-            q_start, q_end = block_start * block_size, block_end * block_size
+-            if q_end > q_start:
+-                query = queries[:, :, q_start:q_end]
+-                key = torch.cat(
+-                    (
+-                        keys[:, :, context_start:context_end],
+-                        keys[:, :, context_length + q_start : context_length + q_end],
+-                    ),
+-                    dim=2,
+-                )
+-                value = torch.cat(
+-                    (
+-                        values[:, :, context_start:context_end],
+-                        values[:, :, context_length + q_start : context_length + q_end],
+-                    ),
+-                    dim=2,
+-                )
+-                anchor = inputs.anchor_positions[
+-                    :, block_start:block_end
+-                ].repeat_interleave(block_size, 1)
+-                live = inputs.block_keep_mask[
+-                    :, block_start:block_end
+-                ].repeat_interleave(block_size, 1)
+-                pos = positions[:, None, context_start:context_end]
+-                context = (pos < anchor[..., None]) & valid[
+-                    :, None, context_start:context_end
+-                ]
+-                if self.window_size is not None:
+-                    context &= pos >= anchor[..., None] - self.window_size
+-                slots = torch.arange(q_end - q_start, device=query.device)
+-                own = slots[:, None] // block_size == slots[None] // block_size
+-                if getattr(self, "causal_queries", False):
+-                    own &= slots[:, None] >= slots[None]
+-                current = own[None] & live[:, None]
+-                mask = (
+-                    torch.cat((context, current), -1)[:, None] & live[:, None, :, None]
+-                )
+-                mask[..., 0] |= ~live[:, None]
+-                # Arbitrary-mask SDPA GQA may fall back to the quadratic math
+-                # kernel. Keep its established equal-head fused-kernel path;
+-                # native GQA is used by the indexed Flex implementation above.
+-                repeats = query.size(1) // key.size(1)
+-                if repeats != 1:
+-                    key, value = (
+-                        key.repeat_interleave(repeats, 1),
+-                        value.repeat_interleave(repeats, 1),
+-                    )
+-                if self.backend == "sdpa":
+-                    output = F.scaled_dot_product_attention(
+-                        query,
+-                        key,
+-                        value,
+-                        attn_mask=mask,
+-                        dropout_p=self.attention_dropout if self.training else 0.0,
+-                        scale=self.scaling,
+-                    )
+-                else:
+-                    scores = (query @ key.transpose(-2, -1)) * self.scaling
+-                    probability = (
+-                        scores.masked_fill(~mask, float("-inf"))
+-                        .softmax(-1, dtype=torch.float32)
+-                        .to(query.dtype)
+-                    )
+-                    probability = F.dropout(
+-                        probability, p=self.attention_dropout, training=self.training
+-                    )
+-                    output = probability @ value
+-                outputs.append(output * live[:, None, :, None].to(output.dtype))
+-            context_start, block_start = context_end, block_end
+-        output = (
+-            torch.cat(outputs, dim=2).transpose(1, 2).reshape(*hidden.shape[:2], -1)
+-        )
+-        live = inputs.block_keep_mask.repeat_interleave(block_size, 1)[..., None]
+-        return self.o_proj(output) * live.to(output.dtype)

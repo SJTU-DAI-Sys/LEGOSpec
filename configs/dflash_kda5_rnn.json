@@ -1,0 +1,99 @@
+{
+  "architectures": [
+    "LegoSpecModel"
+  ],
+  "block_size": 8,
+  "composable_config": {
+    "context": {
+      "type": "concat_projection",
+      "target_layer_ids": [
+        1,
+        9,
+        17,
+        25,
+        33
+      ]
+    },
+    "backbone": {
+      "type": "layer_stack",
+      "layers": [
+        {
+          "attention": {
+            "family": "linear",
+            "variant": "kda"
+          },
+          "local_operator": {
+            "type": "none"
+          }
+        },
+        {
+          "attention": {
+            "family": "linear",
+            "variant": "kda"
+          },
+          "local_operator": {
+            "type": "none"
+          }
+        },
+        {
+          "attention": {
+            "family": "linear",
+            "variant": "kda"
+          },
+          "local_operator": {
+            "type": "none"
+          }
+        },
+        {
+          "attention": {
+            "family": "linear",
+            "variant": "kda"
+          },
+          "local_operator": {
+            "type": "none"
+          }
+        },
+        {
+          "attention": {
+            "family": "linear",
+            "variant": "kda"
+          },
+          "local_operator": {
+            "type": "none"
+          }
+        }
+      ]
+    },
+    "proposal": {
+      "type": "rnn",
+      "rank": 256
+    },
+    "objective": {
+      "type": "weighted_sum",
+      "loss_decay_gamma": 4.0,
+      "components": [
+        {
+          "type": "hard_ce",
+          "weight": 0.1
+        },
+        {
+          "type": "l1",
+          "weight": 0.9
+        }
+      ]
+    },
+    "access_configs": {},
+    "attention_configs": {
+      "kda": {
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+        "linear_key_head_dim": 128,
+        "linear_value_head_dim": 128,
+        "query_conv_kernel_size": 2,
+        "context_conv_kernel_size": 4,
+        "query_conv_mode": "block",
+        "gate_init": 0.1
+      }
+    }
+  }
+}

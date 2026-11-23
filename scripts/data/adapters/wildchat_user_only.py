@@ -20,4 +20,8 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(text, str):
                 raise ValueError(f"message {index} user content must be text")
             messages.append({"role": "user", "content": text})
-    return {"messages": messages, "source": "allenai/WildChat", "category": row.get("language")}
+    return {
+        "messages": messages,
+        "source": "allenai/WildChat",
+        "category": row.get("language"),
+    }

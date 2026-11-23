@@ -1,12 +1,11 @@
 {
   "architectures": [
-    "ComposableDraftModel"
+    "LegoSpecModel"
   ],
   "block_size": 8,
-  "schema_version": "composable_v3",
   "composable_config": {
     "context": {
-      "type": "dflash",
+      "type": "concat_projection",
       "target_layer_ids": [
         1,
         5,

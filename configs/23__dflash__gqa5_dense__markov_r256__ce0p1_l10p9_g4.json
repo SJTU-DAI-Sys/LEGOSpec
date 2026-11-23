@@ -1,12 +1,11 @@
 {
   "architectures": [
-    "ComposableDraftModel"
+    "LegoSpecModel"
   ],
   "block_size": 8,
-  "schema_version": "composable_v3",
   "composable_config": {
     "context": {
-      "type": "dflash",
+      "type": "concat_projection",
       "target_layer_ids": [
         1,
         9,
@@ -19,36 +18,51 @@
       "type": "layer_stack",
       "layers": [
         {
-          "attention": "gqa",
-          "access": "dense",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "full"
+          },
           "local_operator": {
             "type": "none"
           }
         },
         {
-          "attention": "gqa",
-          "access": "dense",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "full"
+          },
           "local_operator": {
             "type": "none"
           }
         },
         {
-          "attention": "gqa",
-          "access": "dense",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "full"
+          },
           "local_operator": {
             "type": "none"
           }
         },
         {
-          "attention": "gqa",
-          "access": "dense",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "full"
+          },
           "local_operator": {
             "type": "none"
           }
         },
         {
-          "attention": "gqa",
-          "access": "dense",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "full"
+          },
           "local_operator": {
             "type": "none"
           }
@@ -74,7 +88,7 @@
       ]
     },
     "access_configs": {
-      "dense": {}
+      "full": {}
     },
     "attention_configs": {
       "gqa": {

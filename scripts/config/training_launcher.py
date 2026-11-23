@@ -85,7 +85,9 @@ def load_yaml_config(
     unknown = sorted(set(launcher) - allowed)
     if unknown:
         raise ConfigError(f"unknown launcher keys: {unknown}")
-    missing_field_names = [key for key in ("target_model", "output_dir") if not launcher.get(key)]
+    missing_field_names = [
+        key for key in ("target_model", "output_dir") if not launcher.get(key)
+    ]
     if missing_field_names:
         raise ConfigError(f"missing launcher keys: {missing_field_names}")
     if bool(launcher.get("train_data")) == bool(launcher.get("train_hidden_states")):
@@ -131,8 +133,14 @@ def validate_common_settings(
         return
     if offline:
         raise ConfigError("disaggregate supports train_data only")
-    required_arg_names = ("target_ranks_per_node", "draft_ranks_per_node", "node_batch_size")
-    missing_arg_names = [name for name in required_arg_names if arguments.get(name) is None]
+    required_arg_names = (
+        "target_ranks_per_node",
+        "draft_ranks_per_node",
+        "node_batch_size",
+    )
+    missing_arg_names = [
+        name for name in required_arg_names if arguments.get(name) is None
+    ]
     if missing_arg_names:
         raise ConfigError(
             "disaggregate requires "
@@ -192,7 +200,7 @@ def launcher_environment(
 ) -> dict[str, str]:
     env = {
         # torchrun workers inherit the launch-time contents, never a mutable path.
-        "LITESPEC_TRAINING_YAML": yaml_snapshot,
+        "LEGOSPEC_TRAINING_YAML": yaml_snapshot,
         "TARGET_MODEL": str(launcher["target_model"]),
         "OUTPUT_DIR": str(launcher["output_dir"]),
         "NPROC_PER_NODE": str(launcher.get("nproc_per_node", 8)),
@@ -265,7 +273,6 @@ def effective_training_yaml(
         "train_data_path": "train_data",
         "train_hidden_states_path": "train_hidden_states",
         "output_dir": "output_dir",
-        "teacher_draft_path": "teacher_draft",
     }
     for name in dict.fromkeys([*arguments, *argument_names]):
         value = parsed_args[name]
@@ -328,23 +335,13 @@ def launch_training(
         "train_hidden_states": effective.get("train_hidden_states_path"),
     }
     validate_common_settings(topology, effective)
-    if module == "scripts.dlite.train_two_stage":
-        if not (effective.get("teacher_draft_path") or effective.get("resume_from")):
-            raise ConfigError(
-                "two_stage requires --teacher-draft-path or --resume-from"
-            )
-        for key in ("stage1_epochs", "stage2_epochs", "learning_rate"):
-            if key not in effective:
-                raise ConfigError(f"two_stage requires --{key.replace('_', '-')}")
     if env.get("DRY_RUN") != "1":
         sys.path.insert(0, str(project_dir))
-        from litespec.training.algorithms import get_training_adapter
+        from legospec.training.config import parse_args
 
-        is_dlite = module.startswith("scripts.dlite.")
-        adapter = get_training_adapter("dlite" if is_dlite else label)
-        parsed = adapter.parse_args(label if is_dlite else None, argv=trainer_cli)
-        env["LITESPEC_TRAINING_YAML"] = effective_training_yaml(
-            configured_env["LITESPEC_TRAINING_YAML"], vars(parsed), list(effective), env
+        parsed = parse_args(argv=trainer_cli)
+        env["LEGOSPEC_TRAINING_YAML"] = effective_training_yaml(
+            configured_env["LEGOSPEC_TRAINING_YAML"], vars(parsed), list(effective), env
         )
     command = [
         sys.executable,

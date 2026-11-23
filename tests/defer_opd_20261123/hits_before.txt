@@ -1,0 +1,373 @@
+legospec/modeling/target/sglang.py:114:    def build_anchor_scorer(self):
+legospec/modeling/target/sglang.py:115:        from legospec.modeling.target.sglang_anchor_opd import SGLangAnchorScorer
+legospec/modeling/target/sglang.py:118:        return SGLangAnchorScorer(self)
+legospec/modeling/target/DESIGN.md:10:anchor scorer 的独立数学保留在原文件，训练端只调用 `build_anchor_scorer()`。
+legospec/modeling/target/training_target_model.py:61:    def build_anchor_scorer(self):
+legospec/modeling/target/sglang_anchor_opd.py:39:class SGLangAnchorScorer:
+legospec/modeling/target/sglang_anchor_opd.py:48:            raise ValueError("SGLang sampled-anchor OPD currently supports dense Qwen3")
+legospec/modeling/target/sglang_anchor_opd.py:50:            raise ValueError("SGLang sampled-anchor OPD requires tp_size=1")
+legospec/modeling/target/sglang_anchor_opd.py:104:                "SGLang OPD pool too small for all anchors together: "
+legospec/modeling/target/sglang_anchor_opd.py:187:                "SGLang anchor OPD requires right-padded source attention masks"
+legospec/modeling/target/hf.py:133:    def build_anchor_scorer(self):
+legospec/modeling/target/hf.py:134:        from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+legospec/modeling/target/hf.py:136:        return Qwen3AnchorScorer(self.model)
+legospec/modeling/target/anchor_opd.py:63:class Qwen3AnchorScorer:
+legospec/modeling/target/anchor_opd.py:73:                "Anchor OPD supports dense, full-attention Qwen3 targets only"
+legospec/modeling/target/anchor_opd.py:79:            raise ValueError("Anchor OPD currently requires standard Qwen3 RoPE")
+legospec/modeling/draft/composable/objective/DESIGN.md:11:待开发的 dpal_plus_plus、tv_survival、opd_survival 位于仓库根目录 development/objectives，未注册到正常训练入口。
+legospec/training/target/setup.py:39:        if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/target/setup.py:68:        and getattr(args, "opd_data_mode", "teacher_forced") != "sampled_anchor"
+legospec/training/DESIGN.md:17:Objective 数学仍归 modeling/draft/composable/objective。已停用的 component-normalized OPD 分支与窗口准备保存在 development/objectives/training_snapshots_20261122，不进入活动训练路径；E2E-TV 共享采样保留。
+legospec/training/runtime/checkpoint.py:278:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/runtime/checkpoint.py:280:            opd_data_mode="sampled_anchor",
+legospec/training/runtime/checkpoint.py:281:            opd_interpretation="current_policy_sampled_blocks",
+legospec/training/runtime/checkpoint.py:282:            opd_accepted_prefix="probabilistic_rejection_sampling",
+legospec/training/runtime/checkpoint.py:283:            opd_temperature=1.0,
+legospec/training/runtime/checkpoint.py:284:            opd_context_source="offline_hidden"
+legospec/training/runtime/checkpoint.py:287:            opd_target_chunk_anchors=0,
+legospec/training/runtime/setup.py:319:    if draft.uses_hidden_feedback and args.opd_data_mode != "teacher_forced":
+legospec/training/runtime/setup.py:321:            "EAGLE3 requires teacher_forced TTT; sampled_anchor OPD is unsupported"
+legospec/training/runtime/setup.py:334:    if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/runtime/setup.py:340:            raise ValueError("sampled_anchor requires Parallel/RNN with e2e_tv")
+legospec/training/runtime/setup.py:342:            raise ValueError("sampled_anchor requires zero attention dropout")
+legospec/training/runtime/setup.py:356:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/runtime/setup.py:357:        session.anchor_scorer = session.target.build_anchor_scorer()
+legospec/training/runtime/setup.py:367:        opd_data_mode=getattr(session.args, "opd_data_mode", "teacher_forced"),
+legospec/training/logger/logging.py:598:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/logger/logging.py:601:                "Sampled anchor OPD requires actual verifier acceptance metrics"
+legospec/training/config.py:494:        "--opd-data-mode",
+legospec/training/config.py:495:        choices=["teacher_forced", "sampled_anchor"],
+legospec/training/config.py:499:        "--opd-target-chunk-anchors",
+legospec/training/config.py:502:        help="Sampled-anchor OPD currently requires 0: score all anchors together.",
+legospec/training/config.py:521:    if args.opd_data_mode == "sampled_anchor":
+legospec/training/config.py:528:        if args.objective_chunk_blocks != 0 or args.opd_target_chunk_anchors != 0:
+legospec/training/config.py:530:                "sampled_anchor processes all anchors; both chunk settings must be 0"
+legospec/training/config.py:533:            parser.error("sampled_anchor requires a collocated target, tp_size=1")
+legospec/training/config.py:535:            parser.error("sampled_anchor requires --init-from or --resume-from")
+legospec/training/execution/step.py:44:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+legospec/training/execution/step.py:47:            record = values["sampled_opd_batch"].to("cuda")
+legospec/training/execution/step.py:53:                sampled_opd_batch=record,
+legospec/training/execution/step.py:58:            opd_scorer=session.anchor_scorer,
+legospec/training/execution/step.py:190:        opd_data_mode="teacher_forced",
+legospec/training/execution/step.py:219:        self.opd_data_mode = opd_data_mode
+legospec/training/execution/step.py:229:            and opd_data_mode != "teacher_forced"
+legospec/training/execution/step.py:232:                "EAGLE3 supports fixed-data teacher_forced TTT, not sampled_anchor OPD"
+legospec/training/execution/step.py:253:        opd_scorer=None,
+legospec/training/execution/step.py:254:        sampled_opd_batch=None,
+legospec/training/execution/step.py:258:        if self.opd_data_mode == "sampled_anchor":
+legospec/training/execution/step.py:259:            from legospec.training.execution.sampled import forward_anchor_opd
+legospec/training/execution/step.py:263:                    "Unexpected sampled OPD arguments: "
+legospec/training/execution/step.py:266:            return forward_anchor_opd(
+legospec/training/execution/step.py:273:                opd_scorer=opd_scorer,
+legospec/training/execution/step.py:274:                sampled_opd_batch=sampled_opd_batch,
+legospec/training/execution/sampled.py:23:class SampledOPDBatch:
+legospec/training/execution/sampled.py:100:def forward_anchor_opd(
+legospec/training/execution/sampled.py:108:    opd_scorer=None,
+legospec/training/execution/sampled.py:109:    sampled_opd_batch=None,
+legospec/training/execution/sampled.py:120:        raise ValueError("Sampled anchor OPD requires Parallel/RNN and e2e_tv")
+legospec/training/execution/sampled.py:123:            "Sampled anchor OPD processes all anchors: objective_chunk_blocks must be 0"
+legospec/training/execution/sampled.py:129:        raise ValueError("Sampled anchor OPD requires zero attention dropout")
+legospec/training/execution/sampled.py:131:    record = sampled_opd_batch
+legospec/training/execution/sampled.py:134:        if opd_scorer is None:
+legospec/training/execution/sampled.py:135:            raise ValueError("Fresh anchor OPD collection requires a target scorer")
+legospec/training/execution/sampled.py:151:            prefix = opd_scorer.prefill_anchors(
+legospec/training/execution/sampled.py:250:                prefix = opd_scorer.prefill_anchors(
+legospec/training/execution/sampled.py:258:                opd_scorer, "uses_live_anchor_hidden", False
+legospec/training/execution/sampled.py:266:            teacher_hidden = opd_scorer.score_sampled_blocks(
+legospec/training/execution/sampled.py:291:            record = SampledOPDBatch(
+legospec/training/execution/sampled.py:384:            # for the walk. Sampled OPD tokens never become metric labels.
+legospec/training/execution/windows.py:20:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+scripts/config/anchor_comparison_sft_rnn.yaml:5:  output_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/sft/checkpoints
+scripts/config/anchor_comparison_sft_rnn.yaml:13:  opd_data_mode: teacher_forced
+scripts/config/anchor_comparison_sft_rnn.yaml:14:  opd_target_chunk_anchors: 0
+scripts/config/anchor_comparison_sft_rnn.yaml:45:  cache_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/runtime
+development/objectives/training_snapshots_20261122/legospec/modeling/draft/composable/objective/base.py:23:    opd_accepted_lengths: Optional[torch.Tensor] = None
+development/objectives/training_snapshots_20261122/legospec/modeling/draft/composable/objective/base.py:24:    opd_distribution_terms: Optional[tuple] = None
+development/objectives/training_snapshots_20261122/legospec/training/batch.py:148:class OPDReplayMetadata:
+development/objectives/training_snapshots_20261122/legospec/training/batch.py:159:    opd_metadata: Optional[dict] = None
+development/objectives/training_snapshots_20261122/legospec/training/batch.py:160:    opd_component_denominators: Optional[dict] = None
+development/objectives/training_snapshots_20261122/legospec/training/batch.py:161:    opd_reference_samples: Optional[torch.Tensor] = None
+development/objectives/training_snapshots_20261122/legospec/training/batch.py:162:    opd_inputs_prepared: bool = False
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:424:    if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:426:            opd_data_mode="sampled_anchor",
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:427:            opd_temperature=1.0,
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:428:            opd_context_source="offline_hidden"
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:459:        if state.get("opd_data_mode", "teacher_forced") != getattr(
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:460:            args, "opd_data_mode", "teacher_forced"
+development/objectives/training_snapshots_20261122/legospec/training/checkpoint.py:463:                "Changing OPD data mode requires init_from, not resume_from"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:368:        if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:397:        and getattr(args, "opd_data_mode", "teacher_forced") != "sampled_anchor"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1097:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1100:                "Sampled anchor OPD requires actual verifier acceptance metrics"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1157:            opd_interpretation="offline_empirical_teacher_forced",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1158:            opd_accepted_prefix="detached_greedy_match_to_fixed_labels",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1159:            opd_reachability="min_accepted_plus_one_including_first_failure",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1161:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1163:            opd_data_mode="sampled_anchor",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1164:            opd_interpretation="current_policy_sampled_blocks",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1165:            opd_accepted_prefix="probabilistic_rejection_sampling",
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1166:            opd_temperature=1.0,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1167:            opd_context_source="offline_hidden"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1170:            opd_target_chunk_anchors=0,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1251:    if draft.uses_hidden_feedback and args.opd_data_mode != "teacher_forced":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1253:            "EAGLE3 requires teacher_forced TTT; sampled_anchor OPD is unsupported"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1266:    if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1273:                "sampled_anchor requires Parallel/RNN with e2e_tv"
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1276:            raise ValueError("sampled_anchor requires zero attention dropout")
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1290:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1292:            from legospec.modeling.target.sglang_anchor_opd import SGLangAnchorScorer
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1294:            session.anchor_scorer = SGLangAnchorScorer(session.target)
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1296:            from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1298:            session.anchor_scorer = Qwen3AnchorScorer(session.target.model)
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1308:        opd_data_mode=getattr(session.args, "opd_data_mode", "teacher_forced"),
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1420:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1423:            record = values["sampled_opd_batch"].to("cuda")
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1429:                sampled_opd_batch=record,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1430:                opd_global_denominators=data.opd_component_denominators,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1431:                opd_reference_samples=data.opd_reference_samples,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1436:            opd_scorer=session.anchor_scorer,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1441:    if prepared is not None and prepared.opd_inputs_prepared:
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1489:    if prepared is not None and prepared.opd_metadata is not None:
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1492:        meta = prepared.opd_metadata[microbatch_start, microbatch_end]
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1494:            opd_accepted_lengths={
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1498:            opd_global_denominators=prepared.opd_component_denominators,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1499:            opd_reference_samples=prepared.opd_reference_samples,
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1554:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1557:        from legospec.training.windows import prepare_anchor_opd_window
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1559:        return prepare_anchor_opd_window(session, first, iterator, count)
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1569:        from legospec.training.windows import prepare_opd_window
+development/objectives/training_snapshots_20261122/legospec/training/setup.py:1571:        return prepare_opd_window(session, first, iterator, count)
+development/objectives/training_snapshots_20261122/legospec/training/step.py:42:        opd_data_mode="teacher_forced",
+development/objectives/training_snapshots_20261122/legospec/training/step.py:71:        self.opd_data_mode = opd_data_mode
+development/objectives/training_snapshots_20261122/legospec/training/step.py:81:            and opd_data_mode != "teacher_forced"
+development/objectives/training_snapshots_20261122/legospec/training/step.py:84:                "EAGLE3 supports fixed-data teacher_forced TTT, not sampled_anchor OPD"
+development/objectives/training_snapshots_20261122/legospec/training/step.py:98:            raise ValueError("OPD-Survival with an indexer is not implemented")
+development/objectives/training_snapshots_20261122/legospec/training/step.py:111:        opd_accepted_lengths=None,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:112:        opd_global_denominators=None,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:113:        opd_reference_samples=None,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:115:        opd_scorer=None,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:116:        sampled_opd_batch=None,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:120:        if self.opd_data_mode == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/step.py:121:            from legospec.training.anchor_opd import forward_anchor_opd
+development/objectives/training_snapshots_20261122/legospec/training/step.py:125:                    "Unexpected sampled OPD arguments: "
+development/objectives/training_snapshots_20261122/legospec/training/step.py:128:            return forward_anchor_opd(
+development/objectives/training_snapshots_20261122/legospec/training/step.py:135:                opd_scorer=opd_scorer,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:136:                sampled_opd_batch=sampled_opd_batch,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:138:                opd_global_denominators=opd_global_denominators,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:139:                opd_reference_samples=opd_reference_samples,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:201:            if opd_accepted_lengths is not None:
+development/objectives/training_snapshots_20261122/legospec/training/step.py:202:                opd_accepted_lengths = {
+development/objectives/training_snapshots_20261122/legospec/training/step.py:206:                    for k, v in opd_accepted_lengths.items()
+development/objectives/training_snapshots_20261122/legospec/training/step.py:340:            if opd_accepted_lengths is not None:
+development/objectives/training_snapshots_20261122/legospec/training/step.py:341:                opd_accepted_lengths = {
+development/objectives/training_snapshots_20261122/legospec/training/step.py:345:                    for name, value in opd_accepted_lengths.items()
+development/objectives/training_snapshots_20261122/legospec/training/step.py:392:                if opd_accepted_lengths is None
+development/objectives/training_snapshots_20261122/legospec/training/step.py:393:                else {name: r[:, start:end] for name, r in opd_accepted_lengths.items()}
+development/objectives/training_snapshots_20261122/legospec/training/step.py:513:                                supervision, opd_accepted_lengths=r
+development/objectives/training_snapshots_20261122/legospec/training/step.py:733:                raise ValueError("OPD-Survival with an indexer is not implemented")
+development/objectives/training_snapshots_20261122/legospec/training/step.py:740:                opd_global_denominators,
+development/objectives/training_snapshots_20261122/legospec/training/step.py:741:                opd_reference_samples,
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:11:def prepare_anchor_opd_window(session, first, iterator, count):
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:25:                    opd_scorer=session.anchor_scorer,
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:39:            record = cpu_copy(metadata["sampled_opd_batch"])
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:43:                "sampled_opd_batch": record,
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:49:                item.spill(Path(session.args.cache_dir) / "anchor_opd_windows")
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:57:            raise ValueError("Sampled OPD optimizer window contains no complete blocks")
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:59:            item.opd_component_denominators = totals
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:60:            item.opd_reference_samples = reference
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:68:"""RNG-preserving detached OPD region metadata for multi-forward windows."""
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:75:from legospec.training.batch import BlockLayout, OPDReplayMetadata, prepare_layout
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:78:def prepare_opd_window(session, first, iterator, count):
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:125:                    replay[start, end] = OPDReplayMetadata(
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:151:                    data, joined, None, opd_metadata=replay, opd_inputs_prepared=True
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:167:                        "OPD optimizer window has no complete supervised blocks"
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:170:            item.opd_component_denominators = cpu_copy(totals)
+development/objectives/training_snapshots_20261122/legospec/training/windows.py:171:            item.opd_reference_samples = cpu_copy(reference)
+development/objectives/training_snapshots_20261122/legospec/training/config.py:501:        "--opd-data-mode",
+development/objectives/training_snapshots_20261122/legospec/training/config.py:502:        choices=["teacher_forced", "sampled_anchor"],
+development/objectives/training_snapshots_20261122/legospec/training/config.py:506:        "--opd-target-chunk-anchors",
+development/objectives/training_snapshots_20261122/legospec/training/config.py:509:        help="Sampled-anchor OPD currently requires 0: score all anchors together.",
+development/objectives/training_snapshots_20261122/legospec/training/config.py:528:    if args.opd_data_mode == "sampled_anchor":
+development/objectives/training_snapshots_20261122/legospec/training/config.py:535:        if args.objective_chunk_blocks != 0 or args.opd_target_chunk_anchors != 0:
+development/objectives/training_snapshots_20261122/legospec/training/config.py:537:                "sampled_anchor processes all anchors; both chunk settings must be 0"
+development/objectives/training_snapshots_20261122/legospec/training/config.py:540:            parser.error("sampled_anchor requires a collocated target, tp_size=1")
+development/objectives/training_snapshots_20261122/legospec/training/config.py:542:            parser.error("sampled_anchor requires --init-from or --resume-from")
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:1:"""Synchronous anchor OPD. Tokens, uniforms and verifier boundaries are replay data.
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:31:class SampledOPDBatch:
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:108:def forward_anchor_opd(
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:116:    opd_scorer=None,
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:117:    sampled_opd_batch=None,
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:118:    opd_global_denominators=None,
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:119:    opd_reference_samples=None,
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:132:            "Sampled anchor OPD requires Parallel/RNN and e2e_tv"
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:136:            "Sampled anchor OPD processes all anchors: objective_chunk_blocks must be 0"
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:142:        raise ValueError("Sampled anchor OPD requires zero attention dropout")
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:144:    record = sampled_opd_batch
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:147:        if opd_scorer is None:
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:148:            raise ValueError("Fresh anchor OPD collection requires a target scorer")
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:164:            prefix = opd_scorer.prefill_anchors(
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:260:                prefix = opd_scorer.prefill_anchors(
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:268:                opd_scorer, "uses_live_anchor_hidden", False
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:276:            teacher_hidden = opd_scorer.score_sampled_blocks(
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:301:            record = SampledOPDBatch(
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:317:        raise ValueError("E2E-TV does not require a sampled OPD metadata pass")
+development/objectives/training_snapshots_20261122/legospec/training/anchor_opd.py:396:            # for the walk. Sampled OPD tokens never become metric labels.
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:61:"""Offline empirical OPD-Survival with separately normalized KL regions.
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:87:class OPDSurvivalObjective(Objective):
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:105:            raise ValueError("opd_survival requires full-vocabulary draft logits")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:107:            raise ValueError("opd_survival labels and draft logits must align")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:109:            raise ValueError("opd_survival prediction mask and labels must align")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:118:            raise ValueError("opd_survival accepted lengths must match block axes")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:126:            raise ValueError("opd_survival accepted lengths must be integer counts")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:130:            raise ValueError("opd_survival accepted lengths must be within [0, K]")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:157:            raise ValueError("opd_survival requires frozen teacher logits")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:159:            raise ValueError("opd_survival requires full-vocabulary draft logits")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:161:            raise ValueError("opd_survival draft and teacher logits must align")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:163:            raise ValueError("opd_survival labels and logits must align")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:165:            raise ValueError("opd_survival prediction mask and labels must align")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:166:        r = getattr(supervision, "opd_accepted_lengths", None)
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:172:        statistics = supervision.opd_distribution_terms
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:186:            raise ValueError("OPD distribution terms must align with [N,A,K] labels")
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:205:            "opd_survival/" + name: terms.detached()
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:210:            "opd_survival/accepted_positions": accepted_count.detach(),
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:211:            "opd_survival/rejected_positions": (capacity - accepted_count).detach(),
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py:212:            "opd_survival/reachable_positions": reachable.sum().to(prefix).detach(),
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/__init__.py:11:from legospec.modeling.draft.composable.objective.survival import OPDSurvivalObjective
+development/objectives/snapshots/legospec/modeling/draft/composable/objective/__init__.py:23:    "opd_survival": OPDSurvivalObjective,
+development/objectives/snapshots/legospec/modeling/draft/composable/schema.py:108:    "opd_survival": {
+development/objectives/snapshots/legospec/modeling/draft/composable/schema.py:212:    if kind in ("tv_survival", "opd_survival"):
+development/objectives/snapshots/legospec/modeling/draft/composable/schema.py:214:    if kind == "opd_survival":
+development/objectives/snapshots/legospec/modeling/draft/composable/loss_config.py:16:BLOCK_OBJECTIVES = DPAL_OBJECTIVES | {"dpace", "tv_survival", "opd_survival", "e2e_tv"}
+development/objectives/snapshots/legospec/modeling/draft/composable/loss_config.py:17:SAMPLED_ANCHOR_OBJECTIVES = frozenset(("opd_survival", "e2e_tv"))
+development/objectives/snapshots/legospec/modeling/draft/composable/loss_config.py:100:    if result["type"] == "opd_survival":
+development/objectives/snapshots/legospec/training/setup.py:368:        if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:397:        and getattr(args, "opd_data_mode", "teacher_forced") != "sampled_anchor"
+development/objectives/snapshots/legospec/training/setup.py:1097:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1100:                "Sampled anchor OPD requires actual verifier acceptance metrics"
+development/objectives/snapshots/legospec/training/setup.py:1159:            opd_interpretation="offline_empirical_teacher_forced",
+development/objectives/snapshots/legospec/training/setup.py:1160:            opd_accepted_prefix="detached_greedy_match_to_fixed_labels",
+development/objectives/snapshots/legospec/training/setup.py:1161:            opd_reachability="min_accepted_plus_one_including_first_failure",
+development/objectives/snapshots/legospec/training/setup.py:1163:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1165:            opd_data_mode="sampled_anchor",
+development/objectives/snapshots/legospec/training/setup.py:1166:            opd_interpretation="current_policy_sampled_blocks",
+development/objectives/snapshots/legospec/training/setup.py:1167:            opd_accepted_prefix="probabilistic_rejection_sampling",
+development/objectives/snapshots/legospec/training/setup.py:1168:            opd_temperature=1.0,
+development/objectives/snapshots/legospec/training/setup.py:1169:            opd_context_source="offline_hidden"
+development/objectives/snapshots/legospec/training/setup.py:1172:            opd_target_chunk_anchors=0,
+development/objectives/snapshots/legospec/training/setup.py:1253:    if draft.uses_hidden_feedback and args.opd_data_mode != "teacher_forced":
+development/objectives/snapshots/legospec/training/setup.py:1255:            "EAGLE3 requires teacher_forced TTT; sampled_anchor OPD is unsupported"
+development/objectives/snapshots/legospec/training/setup.py:1268:    if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1275:                "sampled_anchor requires Parallel/RNN with opd_survival or e2e_tv"
+development/objectives/snapshots/legospec/training/setup.py:1278:            raise ValueError("sampled_anchor requires zero attention dropout")
+development/objectives/snapshots/legospec/training/setup.py:1292:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1294:            from legospec.modeling.target.sglang_anchor_opd import SGLangAnchorScorer
+development/objectives/snapshots/legospec/training/setup.py:1296:            session.anchor_scorer = SGLangAnchorScorer(session.target)
+development/objectives/snapshots/legospec/training/setup.py:1298:            from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+development/objectives/snapshots/legospec/training/setup.py:1300:            session.anchor_scorer = Qwen3AnchorScorer(session.target.model)
+development/objectives/snapshots/legospec/training/setup.py:1310:        opd_data_mode=getattr(session.args, "opd_data_mode", "teacher_forced"),
+development/objectives/snapshots/legospec/training/setup.py:1422:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1425:            record = values["sampled_opd_batch"].to("cuda")
+development/objectives/snapshots/legospec/training/setup.py:1431:                sampled_opd_batch=record,
+development/objectives/snapshots/legospec/training/setup.py:1432:                opd_global_denominators=data.opd_component_denominators,
+development/objectives/snapshots/legospec/training/setup.py:1433:                opd_reference_samples=data.opd_reference_samples,
+development/objectives/snapshots/legospec/training/setup.py:1438:            opd_scorer=session.anchor_scorer,
+development/objectives/snapshots/legospec/training/setup.py:1443:    if prepared is not None and prepared.opd_inputs_prepared:
+development/objectives/snapshots/legospec/training/setup.py:1491:    if prepared is not None and prepared.opd_metadata is not None:
+development/objectives/snapshots/legospec/training/setup.py:1494:        meta = prepared.opd_metadata[microbatch_start, microbatch_end]
+development/objectives/snapshots/legospec/training/setup.py:1496:            opd_accepted_lengths={
+development/objectives/snapshots/legospec/training/setup.py:1500:            opd_global_denominators=prepared.opd_component_denominators,
+development/objectives/snapshots/legospec/training/setup.py:1501:            opd_reference_samples=prepared.opd_reference_samples,
+development/objectives/snapshots/legospec/training/setup.py:1556:    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+development/objectives/snapshots/legospec/training/setup.py:1559:        from legospec.training.windows import prepare_anchor_opd_window
+development/objectives/snapshots/legospec/training/setup.py:1561:        return prepare_anchor_opd_window(session, first, iterator, count)
+development/objectives/snapshots/legospec/training/setup.py:1571:        from legospec.training.windows import prepare_opd_window
+development/objectives/snapshots/legospec/training/setup.py:1573:        return prepare_opd_window(session, first, iterator, count)
+development/objectives/snapshots/legospec/training/component_reduction.py:76:                metrics[branch + "/opd_survival/" + key] = term.detached()
+development/objectives/snapshots/legospec/training/anchor_opd.py:1:"""Synchronous anchor OPD. Tokens, uniforms and verifier boundaries are replay data.
+development/objectives/snapshots/legospec/training/anchor_opd.py:43:class SampledOPDBatch:
+development/objectives/snapshots/legospec/training/anchor_opd.py:120:def forward_anchor_opd(
+development/objectives/snapshots/legospec/training/anchor_opd.py:128:    opd_scorer=None,
+development/objectives/snapshots/legospec/training/anchor_opd.py:129:    sampled_opd_batch=None,
+development/objectives/snapshots/legospec/training/anchor_opd.py:130:    opd_global_denominators=None,
+development/objectives/snapshots/legospec/training/anchor_opd.py:131:    opd_reference_samples=None,
+development/objectives/snapshots/legospec/training/anchor_opd.py:144:            "Sampled anchor OPD requires Parallel/RNN and opd_survival or e2e_tv"
+development/objectives/snapshots/legospec/training/anchor_opd.py:148:            "Sampled anchor OPD processes all anchors: objective_chunk_blocks must be 0"
+development/objectives/snapshots/legospec/training/anchor_opd.py:154:        raise ValueError("Sampled anchor OPD requires zero attention dropout")
+development/objectives/snapshots/legospec/training/anchor_opd.py:157:    record = sampled_opd_batch
+development/objectives/snapshots/legospec/training/anchor_opd.py:160:        if opd_scorer is None:
+development/objectives/snapshots/legospec/training/anchor_opd.py:161:            raise ValueError("Fresh anchor OPD collection requires a target scorer")
+development/objectives/snapshots/legospec/training/anchor_opd.py:177:            prefix = opd_scorer.prefill_anchors(
+development/objectives/snapshots/legospec/training/anchor_opd.py:273:                prefix = opd_scorer.prefill_anchors(
+development/objectives/snapshots/legospec/training/anchor_opd.py:281:                opd_scorer, "uses_live_anchor_hidden", False
+development/objectives/snapshots/legospec/training/anchor_opd.py:289:            teacher_hidden = opd_scorer.score_sampled_blocks(
+development/objectives/snapshots/legospec/training/anchor_opd.py:323:            record = SampledOPDBatch(
+development/objectives/snapshots/legospec/training/anchor_opd.py:341:                "Only component objectives require a sampled OPD metadata pass"
+development/objectives/snapshots/legospec/training/anchor_opd.py:344:            "sampled_opd_batch": record,
+development/objectives/snapshots/legospec/training/anchor_opd.py:374:                opd_accepted_lengths=record.accepted_lengths,
+development/objectives/snapshots/legospec/training/anchor_opd.py:375:                opd_distribution_terms=statistics,
+development/objectives/snapshots/legospec/training/anchor_opd.py:415:            opd_global_denominators,
+development/objectives/snapshots/legospec/training/anchor_opd.py:416:            opd_reference_samples,
+development/objectives/snapshots/legospec/training/anchor_opd.py:455:            # for the walk. Sampled OPD tokens never become metric labels.
+development/objectives/README.md:3:2026-11-22：暂存 `dpal_plus_plus`、`tv_survival`、`opd_survival`。
+development/objectives/README.md:9:- OPD-survival：接受位置 forward KL、拒绝位置 reverse KL，加前缀存活项；beta_rej、rejection_decay 控制拒绝项，survival_weight 控制存活项。离线接受长度由固定标签上的贪心匹配给出；采样模式使用 p/q 验证。
+development/objectives/README.md:13:- `snapshots/legospec/modeling/draft/composable/objective/survival.py`：TV/OPD-survival 原始实现。
+development/objectives/README.md:25:2026-11-22 训练目录重组：其余 OPD component-normalization、metadata window/replay 集成在移出前完整保存在 `training_snapshots_20261122/`。该快照使用重组前的导入路径；恢复时按新功能归属合并。
+development/objectives/configs/27__dflash__gqa5_dense__rnn_r256__opd_survival_b1_d0p8_w1.json:77:      "type": "opd_survival",
+development/objectives/configs/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1.json:76:      "type": "opd_survival",
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:1:# Full-batch T=1 OPD; ten-update smoke template. Choose a fresh output directory.
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:6:  output_dir: /diancpfs/user/wanghanzhen/runs/anchor_opd_cached_hidden/checkpoints
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:13:  opd_data_mode: sampled_anchor
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:14:  opd_target_chunk_anchors: 0
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:15:  init_from: /diancpfs/user/wanghanzhen/runs/legospec_round1_20261026/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1/checkpoints/final
+development/objectives/scripts/config/anchor_opd_cached_hidden.yaml:16:  draft_config: /diancpfs/user/wanghanzhen/LEGOSpec/configs/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1.json
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:1:# Full-batch T=1 OPD; ten-update smoke template. Choose a fresh output directory.
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:6:  output_dir: /diancpfs/user/wanghanzhen/runs/anchor_opd_online_hidden/checkpoints
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:13:  opd_data_mode: sampled_anchor
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:14:  opd_target_chunk_anchors: 0
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:15:  init_from: /diancpfs/user/wanghanzhen/runs/legospec_round1_20261026/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1/checkpoints/final
+development/objectives/scripts/config/anchor_opd_online_hidden.yaml:16:  draft_config: /diancpfs/user/wanghanzhen/LEGOSpec/configs/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1.json
+development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml:5:  output_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/opd/checkpoints
+development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml:13:  opd_data_mode: sampled_anchor
+development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml:14:  opd_target_chunk_anchors: 0
+development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml:16:  draft_config: /data/temp/legospec/LEGOSpec/configs/27__dflash__gqa5_dense__rnn_r256__opd_survival_b1_d0p8_w1.json
+development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml:45:  cache_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/runtime
+docs/SIMPLIFICATION_PLAN.md:11:2026-11-22 训练目录按 runtime/data/target/execution/optim/logger 重组；拆分 setup 和 scheduler，合并 block 张量准备及指标计算，清理暂存 OPD loss 的专属训练残留。不保留旧路径转发层。
+docs/TARGET_CAPTURE_PLAN.md:20:├── anchor_opd.py                  # 当前 Qwen3 HF anchor 数学
+docs/TARGET_CAPTURE_PLAN.md:21:└── sglang_anchor_opd.py           # 当前 Qwen3 SGLang anchor 执行
+tests/unit/test_target_feature_contract.py:14:from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+tests/unit/test_target_feature_contract.py:213:    def test_sampled_anchor_context_is_raw_and_teacher_is_normalized(self):
+tests/unit/test_target_feature_contract.py:214:        scorer = Qwen3AnchorScorer(self.model)
+tests/unit/test_deferred_objectives.py:12:@pytest.mark.parametrize("kind", ["dpal_plus_plus", "tv_survival", "opd_survival"])
+tests/unit/test_e2e_tv_causal.py:13:from legospec.training.execution import sampled as anchor_opd
+tests/unit/test_e2e_tv_causal.py:24:from test_anchor_opd import fixture
+tests/unit/test_e2e_tv_causal.py:69:        opd_data_mode="sampled_anchor",
+tests/unit/test_e2e_tv_causal.py:75:def test_sampled_opd_e2e_uses_one_target_rollout(mode, monkeypatch):
+tests/unit/test_e2e_tv_causal.py:98:    monkeypatch.setattr(anchor_opd, "verify_sampled_blocks", verify)
+tests/unit/test_e2e_tv_causal.py:109:            out = wrapper(**inputs, opd_scorer=scorer, collect_detailed_metrics=log)
+tests/unit/test_composable_eagle3.py:454:def test_padding_empty_short_sequences_and_unsupported_opd():
+tests/unit/test_composable_eagle3.py:467:    with pytest.raises(ValueError, match="sampled_anchor"):
+tests/unit/test_composable_eagle3.py:473:            opd_data_mode="sampled_anchor",
+tests/unit/test_packed_training.py:219:def test_sampled_opd_replay_packs_backbone(proposal):
+tests/unit/test_packed_training.py:220:    from test_anchor_opd import fixture
+tests/unit/test_packed_training.py:227:    batch_type = sampled.SampledOPDBatch
+tests/unit/test_packed_training.py:234:    with patch.object(sampled, "SampledOPDBatch", side_effect=capture), torch.no_grad():
+tests/unit/test_packed_training.py:235:        legacy(**data, opd_scorer=scorer)
+tests/unit/test_packed_training.py:240:        legacy(**data, sampled_opd_batch=record),
+tests/unit/test_packed_training.py:241:        packed(**data, sampled_opd_batch=record),
+tests/unit/test_anchor_opd.py:1:"""Numerical and lifecycle checks for full-batch sampled-anchor OPD."""
+tests/unit/test_anchor_opd.py:11:from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+tests/unit/test_anchor_opd.py:69:        opd_data_mode="sampled_anchor",
+tests/unit/test_anchor_opd.py:71:    scorer = Qwen3AnchorScorer(target)
+tests/unit/test_anchor_opd.py:87:class AnchorOPDTests(unittest.TestCase):
+tests/unit/test_anchor_opd.py:93:        scorer = Qwen3AnchorScorer(model)
+tests/unit/test_anchor_opd.py:126:        scorer = Qwen3AnchorScorer(target_model())
+tests/unit/test_anchor_opd.py:167:        output = wrapper(**values, opd_scorer=scorer)
+tests/unit/test_anchor_opd.py:190:            out = wrapper(**current, opd_scorer=scorer)
+tests/unit/test_anchor_opd.py:211:        output = wrapper(**values, opd_scorer=scorer)
+tests/unit/test_anchor_opd.py:216:        empty = wrapper(**values, opd_scorer=scorer)
+tests/unit/test_anchor_opd.py:239:            "--opd-data-mode",
+tests/unit/test_anchor_opd.py:240:            "sampled_anchor",
+tests/unit/test_anchor_opd.py:248:        self.assertEqual(args.opd_target_chunk_anchors, 0)
+tests/unit/test_anchor_opd.py:250:        # The existing SGLangAnchorScorer supports the same collocated TP=1 path.
+tests/unit/test_anchor_opd.py:255:            ["--opd-target-chunk-anchors", "128"],
+tests/unit/test_disaggregated_streaming_windows.py:185:        args=SimpleNamespace(opd_data_mode="teacher_forced"),

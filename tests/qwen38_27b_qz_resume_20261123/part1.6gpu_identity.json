@@ -1,0 +1,8 @@
+{
+  "fingerprint": "77818b46b4719c10e0a11893fed957981a72b81154d75639ffe41cd445dad8d9",
+  "input": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public/tests/qwen38_27b_qz_resume_20261123/imported/training_data/prompts/prompts_system_user_multi_2parts/part1.jsonl",
+  "input_bytes": 725348934,
+  "input_mtime_ns": 1795255746000000000,
+  "part": 1,
+  "input_shards": 2
+}

@@ -83,126 +83,23 @@ For regeneration input, `category` is optional. When it is absent,
 `regenerate_train_data.py` normalizes it to `null` in successful and error
 outputs so the downstream four-field contract remains stable.
 
-## 3. Save tokens and hidden states
+## 3. Capture raw-tar hidden states
 
 ```bash
-cd /data/wanghanzhen/projects/SpecDecoding/LiteSpec
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-.venv/bin/torchrun --nproc-per-node=8 \
-scripts/data/prepare_hidden_states.py \
-  --target-model-path /data/wanghanzhen/models/Qwen3-4B \
+python -m scripts.data.capture_hidden_states \
+  --target-model-path /path/to/target \
   --target-model-backend sglang \
-  --data-path /data/wanghanzhen/projects/SpecDecoding/LiteSpec/cache/data/regen_token_only/wildchat_chinese_turns_le2_qwen3_4b_temp0.7_topk15_max4096.jsonl \
-  --output-path /data/wanghanzhen/projects/SpecDecoding/LiteSpec/cache/data/regen_full/wildchat_chinese_qwen3_4b \
-  --target-layer-ids 0,8,16,24,31 \
-  --max-length 4096 \
-  --tp-size 1 \
-  --sglang-ep-size 1 \
-  --batch-size 1 \
-  --shard-size 512
-
+  --data-path /path/to/regenerated.jsonl \
+  --output-path /path/to/raw-cache \
+  --target-layer-ids 1,9,17,25,33 \
+  --max-length 4096 --batch-size 1 \
+  --tar-shard-bytes 2147483648
 ```
 
-Each saved sample contains `input_ids`, `attention_mask`, `loss_mask`, and the
-selected hidden-state layers. A full shard contains 512 successful samples;
-failed samples are logged and later successful samples fill their places. Use
-`--resume` after an interrupted run. This is the `regen_full` save mode, whose
-default root is `./cache/data/regen_full/`; `--output-path` overrides it.
+Only `tar-raw-v1` is supported for capture and training. The pipeline uses asynchronous capture, reusable/preallocated pinned buffers, automatic bulk D2H for packed outputs, streaming SHA256 and asynchronous durable commits. Non-packed backend outputs use tensor layout adaptation. Capacity knobs remain available for memory, pending batches, workers and shard size; obsolete sync/format/ablation switches are removed.
 
-`regen_full` schema v2 always stores the target model's final-norm hidden state
-as `final_hidden_state`, even when `--target-layer-ids` selects only intermediate
-layers. If the selected IDs already contain the final layer, it is not stored a
-second time in `hidden_states`.
+Samples store IDs, masks, selected raw decoder features and the explicit post-norm teacher feature. Gemma's final decoder output and final-norm output remain distinct; optional final-norm reconstruction retains its explicit feature contract.
 
-The two names describe save granularity for the same regenerated dataset:
+`--resume` validates committed shard identity and checksum, discards incomplete temporary shards and captures only missing source records. The final manifest is published after every async commit completes and all records are covered. Training must consume a complete manifest. Historical caches are retained on disk but unsupported formats require a separate explicit conversion before use.
 
-- `regen_token_only`: regenerated answers in JSONL, without hidden states.
-- `regen_full`: token IDs, masks, and hidden states in training shards.
-
-
-
-## 4. Train from regen_full
-
-All DLite training entrypoints accept either online JSONL or an offline cache.
-Use exactly one of `--train-data-path` and `--train-hidden-states-path`:
-
-```bash
-torchrun --nproc-per-node=8 -m scripts.dlite.train_sft \
-  --target-model-path /path/to/model \
-  --train-hidden-states-path ./cache/data/regen_full/dataset_model \
-  --tp-size 1 \
-  --output-dir ./cache/models/run \
-  ...
-```
-
-Offline training loads only the frozen target embedding and LM head. Target
-logits are computed from cached `final_hidden_state` at the sampled anchor
-positions. Offline mode requires `--tp-size 1` and does not support
-`--shard-draft-by-tp`; multiple torchrun workers operate as data-parallel ranks.
-
-The shell launchers use `TRAIN_DATA_PATH` for online mode or
-`TRAIN_HIDDEN_STATES_PATH` for offline mode. These environment variables are
-mutually exclusive.
-
-
-## Optimized offline capture and raw-tar training
-
-The optimized entry point is independent of local experiment directories. Its
-defaults enable the full optimized path: SGLang, asynchronous capture,
-`tar-raw-v1`, packed requests, streaming SHA256, and asynchronous tar commits.
-The Qwen3-4B configuration captures BF16 layers 1, 9, 17, 25, 33 and the final
-normalized layer 35, retaining original responses and max_length=4096:
-
-```bash
-python -m torch.distributed.run --nproc-per-node=2 --master-port=29679 \
-  -m scripts.data.capture_hidden_states \
-  --target-model-path /path/to/Qwen3-4B --target-model-backend sglang \
-  --sglang-attention-backend fa3 --tp-size 1 --batch-size 4 \
-  --data-path /path/to/data/training/answers.jsonl \
-  --output-path /path/to/data/hidden/full80k/cache \
-  --cache-dir /path/to/data/preprocessed/capture --max-length 4096 \
-  --tar-shard-bytes 2147483648 \
-  --pipeline-depth 2 --writer-workers 2 --max-pending-bytes 8589934592 \
-  --fail-on-error
-```
-
-The five optimization flags are enabled by default and need not be repeated.
-Use `--capture-mode sync`, `--no-packed-requests`, `--no-tar-stream-sha`, or
-`--no-tar-async-commit` to override individual choices. To use legacy synchronous
-output, pass `--capture-mode sync --cache-format tar-v2 --no-packed-requests
---no-tar-stream-sha --no-tar-async-commit` on one command line. Packed capture
-requires SGLang; explicit `--target-model-backend hf` must use
-`--no-packed-requests` and `--max-batch-tokens 0`. The separate legacy
-`prepare_hidden_states` entry point retains its original behavior.
-
-Raw members store tensor descriptors and exact tensor bytes inside ordinary
-uncompressed tar shards. They avoid per-sample hidden clones and `torch.save`
-packing. Each rank publishes its own final shards plus a unified sample index;
-training ranks use the distributed sampler rather than owning capture-rank files.
-The writer retains buffers until writes finish and propagates asynchronous errors.
-Use `--resume` only with the same input/model/capture identity; already committed
-shards are verified on resume, and only uncommitted samples are recaptured.
-
-SHA256 is computed while writing; fsync and atomic data/index publication remain.
-This entry point does not perform an additional full-dataset readback after
-capture. Optional `--profiling-output /path/to/data/profiling/run1` writes CPU/CUDA
-timing outside the cache. Do not put datasets, checkpoints or profiling artifacts
-in test/tests directories.
-
-The training reader supports `tar-v2`, `tar-indexed-v2`, and `tar-raw-v1` with the
-same tokens, masks and hidden fields. Start from
-`scripts/config/offline_dflare_parallel_ce.yaml` or
-`scripts/config/offline_dflare_parallel_ce_tv.yaml`, replace `/path/to` paths,
-then run:
-
-```bash
-python -m scripts.config.launch_composable \
-  --config scripts/config/offline_dflare_parallel_ce.yaml
-```
-
-Both templates use two GPUs, batch4 per GPU, accumulation1 (global batch8),
-512 total anchors, objective_chunk_blocks256, max_length4096 and six epochs.
-The CE+TV template keeps the original 0.1 CE / 0.9 TV weighting. Training validates
-manifest/index structure and sample tensors, but full shard checksum readback is
-off by default. Opt in with `verify_hidden_cache_checksums: true` or
-`--verify-hidden-cache-checksums` when explicitly needed.
+`--no-packed-requests` selects a non-packed backend output layout; it does not change the storage format or create another writer. HF capture requires this option. Finite-value auditing, checksum validation and selective raw reads remain available in shared data facilities.

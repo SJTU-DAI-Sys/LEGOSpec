@@ -1,0 +1,68 @@
+{
+  "created_at": 1795366783.5465949,
+  "files": [
+    {
+      "path": "training_data/prompts/prompts_system_user_multi.jsonl",
+      "bytes": 1451107059,
+      "records": 1411206,
+      "sha256": "d2d772200afc3057dda0ee5081dca69d4e9317e93aff279c9eb9928a1d621c6b",
+      "mtime_ns": 1795250920493972751
+    },
+    {
+      "path": "training_data/prompts/prompts_system_user_multi_2parts/part0.jsonl",
+      "bytes": 725758125,
+      "records": 705603,
+      "sha256": "668b10b48a6284b3effdeabba3537869c1a31443c9d3fddcaf9c6f1009fd59f4",
+      "mtime_ns": 1795255746549489824
+    },
+    {
+      "path": "training_data/prompts/prompts_system_user_multi_2parts/part1.jsonl",
+      "bytes": 725348934,
+      "records": 705603,
+      "sha256": "365175fe04a3b55684f64efd44966ae049c15adb8971e1646be1c922e92ef3f5",
+      "mtime_ns": 1795255746618919792
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part0.jsonl",
+      "bytes": 5444631475,
+      "records": 278074,
+      "sha256": "03cc5e08d99550bec60280346d515e7399a7f07f9205685e967860fc61fa97ba",
+      "mtime_ns": 1795345820395559965
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part0.rejected.jsonl",
+      "bytes": 298181,
+      "records": 26,
+      "sha256": "f4463cec87c005f173ddc7f789cba59b4586247527ffb66ccab5fbc5d3d49802",
+      "mtime_ns": 1795344173556918204
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part0.truncated.jsonl",
+      "bytes": 435635259,
+      "records": 20276,
+      "sha256": "c9d62e62bcc9ddbe144f27fa56c9e6e1e7d637556d197200195b416362e6cfe1",
+      "mtime_ns": 1795345808652723379
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part1.jsonl",
+      "bytes": 5390681301,
+      "records": 276575,
+      "sha256": "07704320c41914ff48a5afb34c1d61a45aa8ba37a517adb262bf8ac14a719769",
+      "mtime_ns": 1795345820355157969
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part1.rejected.jsonl",
+      "bytes": 402160,
+      "records": 33,
+      "sha256": "23f246bec6019b50f7ec84b9a2e9a6101a9f310c7839cf632d7e6b81c06c22d6",
+      "mtime_ns": 1795345281349229712
+    },
+    {
+      "path": "training_data/regen/qwen38_27b_prompts1411k_T1_medium_think2048_max5120_20261121/default/part1.truncated.jsonl",
+      "bytes": 433400720,
+      "records": 20161,
+      "sha256": "41a98ee436e6c651b16f98400d24178abd4c78dc79a0a4a91d95f7e3fbb3a021",
+      "mtime_ns": 1795345817192980203
+    }
+  ]
+}

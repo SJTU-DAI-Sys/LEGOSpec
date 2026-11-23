@@ -1,0 +1,6 @@
+{
+  "legospec/modeling/target/anchor_opd.py": "target/anchor_opd.py",
+  "legospec/modeling/target/sglang_anchor_opd.py": "target/sglang_anchor_opd.py",
+  "legospec/training/execution/sampled.py": "sampled.py",
+  "scripts/config/anchor_comparison_sft_rnn.yaml": "configs/anchor_comparison_sft_rnn.yaml"
+}

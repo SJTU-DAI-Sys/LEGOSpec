@@ -1,0 +1,1340 @@
+--- before/legospec/modeling/draft/composable/schema.py
++++ after/legospec/modeling/draft/composable/schema.py
+@@ -14,7 +14,7 @@
+     normalize_training_recipe,
+ )
+ 
+-ATTENTION_TYPES = ("mha", "gqa", "mla", "gdn")
++ATTENTION_TYPES = ("mha", "gqa", "mqa", "mla", "gdn", "kda")
+ ACCESS_TYPES = ("dense", "sliding_window", "dsa", "linear")
+ PROPOSAL_TYPES = (
+     "parallel",
+@@ -82,8 +82,10 @@
+     "local_operator": {"type", "kernel_size", "group_size"},
+     "mha": {"num_attention_heads", "num_key_value_heads", "head_dim"},
+     "gqa": {"num_attention_heads", "num_key_value_heads", "head_dim"},
++    "mqa": {"num_attention_heads", "num_key_value_heads", "head_dim"},
+     "mla": set(MLA_DEFAULTS),
+     "gdn": set(GDN_DEFAULTS),
++    "kda": set(GDN_DEFAULTS),
+     "dense": set(),
+     "linear": set(),
+     "sliding_window": {"window_size"},
+@@ -217,7 +219,7 @@
+             raise ValueError(path + ".rejection_decay must be in (0, 1]")
+ 
+ 
+-def normalize_recipe(config):
++def _normalize_legacy(config):
+     r = deepcopy(config.composable_config)
+     fields(r, FIELDS["recipe"], "composable_config")
+     for required in ("context", "backbone", "attention_configs"):
+@@ -284,9 +286,7 @@
+         or not isinstance(b.get("layers"), list)
+         or not b["layers"]
+     ):
+-        raise ValueError(
+-            "backbone.type must be layer_stack with nonempty layers"
+-        )
++        raise ValueError("backbone.type must be layer_stack with nonempty layers")
+     if len(b["layers"]) != config.num_hidden_layers:
+         raise ValueError("layers length must equal num_hidden_layers")
+     query_attention = b.get("query_attention", "full_parallel")
+@@ -311,14 +311,12 @@
+             if access != "sliding_window":
+                 raise ValueError("layers[].window_size requires sliding_window access")
+             integer(layer["window_size"], "layers[].window_size")
+-        if (kind == "gdn") != (access == "linear") or (
+-            kind == "mla" and access == "dsa"
+-        ):
++        if (kind in ("gdn", "kda")) != (access == "linear"):
+             raise ValueError(
+                 "invalid attention/access combination: " + kind + "/" + access
+             )
+         if "block_attention" in layer:
+-            if kind != "gdn":
++            if kind not in ("gdn", "kda"):
+                 raise ValueError("block_attention requires a GDN layer")
+             block_attention = layer["block_attention"]
+             fields(block_attention, FIELDS["block_attention"], "block_attention")
+@@ -385,13 +383,15 @@
+         raise ValueError("target Q heads must be divisible by target KV heads")
+     for kind, profile in profiles.items():
+         fields(profile, FIELDS[kind], "attention_configs." + kind)
+-        if kind in ("mha", "gqa"):
++        if kind in ("mha", "gqa", "mqa"):
+             q = target["num_attention_heads"]
+             defaults = dict(
+                 num_attention_heads=q,
+-                num_key_value_heads=q
+-                if kind == "mha"
+-                else target["num_key_value_heads"],
++                num_key_value_heads=(
++                    q
++                    if kind == "mha"
++                    else 1 if kind == "mqa" else target["num_key_value_heads"]
++                ),
+                 head_dim=target["head_dim"],
+             )
+         else:
+@@ -409,7 +409,7 @@
+                     )
+             else:
+                 integer(value, kind + "." + key)
+-        if kind in ("mha", "gqa"):
++        if kind in ("mha", "gqa", "mqa"):
+             if profile["num_attention_heads"] != target["num_attention_heads"]:
+                 raise ValueError("MHA/GQA Q heads must equal target Q heads")
+             if (
+@@ -424,6 +424,14 @@
+                 raise ValueError(
+                     "MHA requires equal Q/K/V head counts; use gqa for grouped KV"
+                 )
++        if kind == "mqa" and profile["num_key_value_heads"] != 1:
++            raise ValueError("MQA requires exactly one KV head")
++        if (
++            kind == "kda"
++            and profile["linear_key_head_dim"] > 256
++            and config.execution_config["gdn_backend"] != "reference"
++        ):
++            raise ValueError("KDA FLA supports key head dimension <=256")
+         if kind == "mla" and (
+             profile["num_attention_heads"] != profile["num_key_value_heads"]
+             or profile["qk_rope_head_dim"] % 2
+@@ -431,7 +439,7 @@
+             raise ValueError(
+                 "expanded MLA requires equal head counts and even RoPE dimension"
+             )
+-        if kind == "gdn":
++        if kind in ("gdn", "kda"):
+             if profile["linear_num_value_heads"] % profile["linear_num_key_heads"]:
+                 raise ValueError("GDN V heads must be a multiple of Q/K heads")
+             if (
+@@ -442,7 +450,7 @@
+     for layer in b["layers"]:
+         branch = layer.get("block_attention")
+         if branch is not None and branch.get("share_gdn_projections", False):
+-            profile = profiles["gdn"]
++            profile = profiles[layer["attention"]]
+             for key, expected in (
+                 ("num_heads", profile["linear_num_value_heads"]),
+                 ("head_dim", profile["linear_key_head_dim"]),
+@@ -507,7 +515,7 @@
+         if config.attention_dropout:
+             raise ValueError("FlexAttention requires attention_dropout=0")
+         for kind, profile in profiles.items():
+-            if kind != "gdn":
++            if kind not in ("gdn", "kda"):
+                 qk = (
+                     profile["qk_nope_head_dim"] + profile["qk_rope_head_dim"]
+                     if kind == "mla"
+@@ -528,17 +536,20 @@
+ 
+ def runtime_recipe(config):
+     """Expand only in memory: serialized recipes stay compact and shared."""
++    if isinstance(config.composable_config["backbone"]["layers"][0]["attention"], dict):
++        config = _execution_recipe(config)
+     r = deepcopy(config.composable_config)
+     profiles, accesses = r.pop("attention_configs"), r.pop("access_configs")
+     layers = []
+     for layer in r["backbone"]["layers"]:
+         kind, access = layer["attention"], layer["access"]
+-        if kind == "gdn":
++        if kind in ("gdn", "kda"):
+             layers.append(
+                 {
+-                    "attention": {"representation": "gdn", "access": "linear"},
++                    "attention": {"representation": kind, "access": "linear"},
+                     "gdn_config": {
+                         **profiles[kind],
++                        "variant": kind,
+                         "backend": config.execution_config["gdn_backend"],
+                     },
+                     **(
+@@ -578,7 +589,101 @@
+                     ),
+                 }
+             )
++    if getattr(config, "_intrinsic_linear_attention", False):
++        for layer in layers:
++            if layer["attention"]["representation"] in ("gdn", "kda"):
++                branch = layer.pop("block_attention")
++                layer["gdn_config"].update(
++                    intrinsic_block_attention=True, gate_init=branch["gate_init"]
++                )
+     r["backbone"]["layers"] = layers
+     if "dsa" in accesses:
+         r["indexer"] = accesses["dsa"]
+     return r
++
++
++FAMILIES = {
++    "dense": ("mha", "gqa", "mqa"),
++    "latent": ("mla",),
++    "linear": ("gdn", "kda"),
++}
++ACCESS = {"full": "dense", "swa": "sliding_window", "dsa": "dsa"}
++
++
++def _execution_recipe(config):
++    result = deepcopy(config)
++    result._intrinsic_linear_attention = True
++    r = deepcopy(config.composable_config)
++    profiles = r["attention_configs"]
++    gates = {}
++    for variant in ("gdn", "kda"):
++        if variant in profiles:
++            gate = profiles[variant].pop("gate_init", 0.1)
++            number(gate, variant + ".gate_init", strict=True)
++            if gate >= 1:
++                raise ValueError("gate_init must be between zero and one")
++            gates[variant] = gate
++    for layer in r["backbone"]["layers"]:
++        fields(layer, {"attention", "local_operator"}, "layers[]")
++        attn = layer["attention"]
++        fields(
++            attn, {"family", "variant", "access", "window_size"}, "layers[].attention"
++        )
++        family, variant = attn.get("family"), attn.get("variant")
++        if family not in FAMILIES or variant not in FAMILIES[family]:
++            raise ValueError("Invalid attention family/variant")
++        layer["attention"] = variant
++        if family == "linear":
++            if "access" in attn or "window_size" in attn:
++                raise ValueError(
++                    "Linear attention reads recurrent state; token access does not apply"
++                )
++            layer["access"] = "linear"
++            layer["block_attention"] = {
++                "share_gdn_projections": True,
++                "gate_init": gates.get(variant, 0.1),
++            }
++        else:
++            access = attn.get("access", "full")
++            if access not in ACCESS:
++                raise ValueError("Token access must be full, swa or dsa")
++            layer["access"] = ACCESS[access]
++            if "window_size" in attn:
++                layer["window_size"] = attn["window_size"]
++    ac = r.setdefault("access_configs", {})
++    fields(ac, set(ACCESS), "access_configs")
++    r["access_configs"] = {ACCESS[k]: v for k, v in ac.items()}
++    result.composable_config = r
++    result.composable_config = _normalize_legacy(result)
++    return result
++
++
++def normalize_recipe(config):
++    # String recipes retain their exact historical graph for saved checkpoints.
++    layers = config.composable_config.get("backbone", {}).get("layers") or [{}]
++    if not isinstance(layers[0].get("attention"), dict):
++        return _normalize_legacy(config)
++    original = config.composable_config
++    normalized = _execution_recipe(config).composable_config
++    variants = [
++        layer["attention"]["variant"] for layer in original["backbone"]["layers"]
++    ]
++    for layer, variant in zip(normalized["backbone"]["layers"], variants):
++        family = next(f for f, vs in FAMILIES.items() if variant in vs)
++        access = layer.pop("access")
++        branch = layer.pop("block_attention", None)
++        layer["attention"] = {"family": family, "variant": variant}
++        if family == "linear":
++            normalized["attention_configs"][variant]["gate_init"] = branch["gate_init"]
++        else:
++            layer["attention"]["access"] = next(
++                k for k, v in ACCESS.items() if v == access
++            )
++            if "window_size" in layer:
++                layer["attention"]["window_size"] = layer.pop("window_size")
++    normalized["access_configs"] = {
++        next(k for k, v in ACCESS.items() if v == key): value
++        for key, value in normalized["access_configs"].items()
++        if key != "linear"
++    }
++    return normalized
+--- before/legospec/modeling/draft/composable/configuration.py
++++ after/legospec/modeling/draft/composable/configuration.py
+@@ -28,7 +28,14 @@
+                 "backbone": {
+                     "type": "layer_stack",
+                     "layers": [
+-                        {"attention": "gqa", "access": "dense"} for _ in range(depth)
++                        {
++                            "attention": {
++                                "family": "dense",
++                                "variant": "gqa",
++                                "access": "full",
++                            }
++                        }
++                        for _ in range(depth)
+                     ],
+                 },
+                 "proposal": {"type": "parallel"},
+@@ -73,7 +80,9 @@
+         result.composable_config = runtime_recipe(self)
+         if self.indexer_config is not None:
+             first = result.composable_config["backbone"]["layers"][0]["attention"]
+-            result.indexer_source_width = (
+-                first["num_attention_heads"] * first["head_dim"]
++            result.indexer_source_width = first["num_attention_heads"] * (
++                first["qk_nope_head_dim"] + first["qk_rope_head_dim"]
++                if first["representation"] == "mla"
++                else first["head_dim"]
+             )
+         return result
+--- before/legospec/modeling/draft/composable/backbone/model.py
++++ after/legospec/modeling/draft/composable/backbone/model.py
+@@ -34,20 +34,31 @@
+         self.input_fusion = config.composable_config["backbone"].get(
+             "input_fusion", "identity"
+         )
+-        self.recurrent = recipe["attention"]["representation"] == "gdn"
++        self.recurrent = recipe["attention"]["representation"] in ("gdn", "kda")
+         if self.recurrent:
+             self.position_embedding = nn.Embedding(
+                 config.block_size, config.hidden_size
+             )
+             self.mixer = GDNContextMemoryMixer(config, recipe["gdn_config"])
++            linear = recipe["gdn_config"]
++            block = (
++                dict(
++                    share_gdn_projections=True,
++                    num_heads=linear["linear_num_value_heads"],
++                    head_dim=linear["linear_key_head_dim"],
++                    gate_init=linear["gate_init"],
++                )
++                if linear.get("intrinsic_block_attention")
++                else recipe.get("block_attention")
++            )
+             self.block_attention = (
+                 GatedBlockAttention(
+                     config.hidden_size,
+                     self.block_size,
+-                    recipe["block_attention"],
++                    block,
+                     gdn_config=recipe["gdn_config"],
+                 )
+-                if recipe.get("block_attention") is not None
++                if block is not None
+                 else None
+             )
+         else:
+@@ -70,6 +81,7 @@
+                 elif recipe["attention"]["representation"] in (
+                     "mha",
+                     "gqa",
++                    "mqa",
+                     "mla",
+                 ) and key in (
+                     "num_attention_heads",
+--- before/legospec/modeling/draft/composable/backbone/attention/gdn.py
++++ after/legospec/modeling/draft/composable/backbone/attention/gdn.py
+@@ -41,7 +41,10 @@
+             if repeat != 1:
+                 qt = qt.repeat_interleave(repeat, 0)
+                 kt = kt.repeat_interleave(repeat, 0)
+-            state = state * g[0, t].float().exp()[:, None, None]
++            decay = g[0, t].float().exp()
++            state = state * (
++                decay[:, None, None] if decay.ndim == 1 else decay[:, :, None]
++            )
+             old = (state * kt[:, :, None]).sum(-2)
+             delta = beta[0, t].float()[:, None] * (v[0, t].float() - old)
+             state = state + kt[:, :, None] * delta[:, None, :]
+@@ -67,6 +70,7 @@
+ class GDNContextMemoryMixer(nn.Module):
+     def __init__(self, config, recipe):
+         super().__init__()
++        self.variant = recipe.get("variant", "gdn")
+         self.hk = recipe["linear_num_key_heads"]
+         self.hv = recipe["linear_num_value_heads"]
+         self.dk = recipe["linear_key_head_dim"]
+@@ -80,7 +84,10 @@
+         self.in_proj_kv = nn.Linear(
+             config.hidden_size, self.key_dim + self.value_dim, bias=False
+         )
+-        self.in_proj_a = nn.Linear(config.hidden_size, self.hv, bias=False)
++        self.gate_shape = (self.hv, self.dk) if self.variant == "kda" else (self.hv,)
++        self.in_proj_a = nn.Linear(
++            config.hidden_size, math.prod(self.gate_shape), bias=False
++        )
+         self.in_proj_b = nn.Linear(config.hidden_size, self.hv, bias=False)
+         self.in_proj_z = nn.Linear(config.hidden_size, self.value_dim, bias=False)
+         self.query_conv = nn.Conv1d(
+@@ -91,7 +98,7 @@
+             channels, channels, self.context_kernel, groups=channels, bias=False
+         )
+         self.A_log = nn.Parameter(torch.empty(self.hv))
+-        self.dt_bias = nn.Parameter(torch.ones(self.hv))
++        self.dt_bias = nn.Parameter(torch.ones(self.gate_shape))
+         self.norm = GDNRMSNormGated(self.dv, config.rms_norm_eps)
+         self.out_proj = nn.Linear(self.value_dim, config.hidden_size, bias=False)
+         self.reset_gdn_parameters()
+@@ -266,12 +273,18 @@
+         k, v = mixed.split((self.key_dim, self.value_dim), -1)
+         k, v = k.reshape(-1, self.hk, self.dk), v.reshape(-1, self.hv, self.dv)
+         beta = self.in_proj_b(c).sigmoid()
+-        g = -self.A_log.float().exp() * F.softplus(
+-            self.in_proj_a(c).float() + self.dt_bias.float()
++        rate = self.A_log.float().exp()
++        if self.variant == "kda":
++            rate = rate[:, None]
++        g = -rate * F.softplus(
++            self.in_proj_a(c).float().reshape(-1, *self.gate_shape)
++            + self.dt_bias.float()
+         )
+         if layout.context_keep is not None:
+             beta = beta.masked_fill(~layout.context_keep[:, None], 0)
+-            g = g.masked_fill(~layout.context_keep[:, None], 0)
++            g = g.masked_fill(
++                ~layout.context_keep.reshape(-1, *([1] * len(self.gate_shape))), 0
++            )
+         # index_copy is differentiable, including empty source indices. Read
+         # gates MUST stay zero: never activate/sigmoid these events in-kernel.
+         e = layout.num_events
+@@ -285,7 +298,9 @@
+             ve = v.new_zeros(1, e, self.hv, self.dv).index_copy(
+                 1, layout.write_events, v[None]
+             )
+-            ge = g.new_zeros(1, e, self.hv).index_copy(1, layout.write_events, g[None])
++            ge = g.new_zeros(1, e, *self.gate_shape).index_copy(
++                1, layout.write_events, g[None]
++            )
+             be = beta.new_zeros(1, e, self.hv).index_copy(
+                 1, layout.write_events, beta[None]
+             )
+@@ -301,7 +316,10 @@
+                     raise ValueError(
+                         "GDN FLA backend requires CUDA; use backend=reference on CPU"
+                     )
+-                from fla.ops.gated_delta_rule import chunk_gated_delta_rule
++                if self.variant == "kda":
++                    from fla.ops.kda import chunk_kda as chunk_gated_delta_rule
++                else:
++                    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+ 
+                 dense = layout.dense_shape
+ 
+--- before/legospec/modeling/draft/composable/backbone/attention/__init__.py
++++ after/legospec/modeling/draft/composable/backbone/attention/__init__.py
+@@ -1,7 +1,12 @@
+ from legospec.modeling.draft.composable.backbone.attention.gqa import GQAAttention
+ from legospec.modeling.draft.composable.backbone.attention.mla import MLAAttention
+ 
+-ATTENTIONS = {"mha": GQAAttention, "gqa": GQAAttention, "mla": MLAAttention}
++ATTENTIONS = {
++    "mha": GQAAttention,
++    "gqa": GQAAttention,
++    "mqa": GQAAttention,
++    "mla": MLAAttention,
++}
+ 
+ 
+ def build_attention(config, layer_idx, kernels, recipe, separate_context=False):
+--- before/legospec/modeling/draft/composable/backbone/attention/mla.py
++++ after/legospec/modeling/draft/composable/backbone/attention/mla.py
+@@ -17,6 +17,7 @@
+ class MLAAttention(AttentionForward, MLAProjection):
+     def __init__(self, config, layer_idx, kernels, recipe, separate_context=False):
+         super().__init__(config, layer_idx, kernels)
++        self.is_dsa = recipe.get("access") == "dsa"
+         self.backend = recipe.get("backend", "sdpa")
+         self.flex_backend = recipe.get("flex_backend", "TRITON")
+         self.window_size = (
+@@ -41,15 +42,19 @@
+             )
+         batch_size, query_length = draft_hidden_states.shape[:2]
+         context_length = context_hidden_states.size(1)
+-        query = self._project_q(draft_hidden_states).view(
+-            batch_size, query_length, self.num_heads, self.qk_head_dim
+-        ).transpose(1, 2)
++        query = (
++            self._project_q(draft_hidden_states)
++            .view(batch_size, query_length, self.num_heads, self.qk_head_dim)
++            .transpose(1, 2)
++        )
+         query_nope, query_rope = query.split(
+             [self.qk_nope_head_dim, self.qk_rope_head_dim], -1
+         )
+         cos, sin = position_embeddings
+         query_rope = apply_mla_rope(
+-            query_rope, cos[:, -query_length:], sin[:, -query_length:],
++            query_rope,
++            cos[:, -query_length:],
++            sin[:, -query_length:],
+             interleaved=self.rope_interleaved,
+         )
+         context_projection = (
+@@ -67,13 +72,17 @@
+         )
+         draft_latent = self.kv_a_layernorm(draft_latent)
+         key_rope = apply_mla_rope(
+-            torch.cat((context_rope, draft_rope), 1).unsqueeze(1), cos, sin,
++            torch.cat((context_rope, draft_rope), 1).unsqueeze(1),
++            cos,
++            sin,
+             interleaved=self.rope_interleaved,
+         ).squeeze(1)
+         context_rope, draft_rope = key_rope.split([context_length, query_length], 1)
+         positions = inputs.context_position_ids
+         if positions is None:
+-            positions = torch.arange(context_length, device=query.device)[None].expand(batch_size, -1)
++            positions = torch.arange(context_length, device=query.device)[None].expand(
++                batch_size, -1
++            )
+         valid = inputs.context_valid_mask
+         if valid is None:
+             valid = torch.ones_like(positions, dtype=torch.bool)
+@@ -83,29 +92,54 @@
+         if inputs.draft_state is not None:
+             previous = inputs.draft_state.layers.get(self.layer_idx)
+             if previous is not None:
+-                if context_length and previous.positions.numel() and (
+-                    positions[:, :1] <= previous.positions.masked_fill(~previous.valid, -1).amax(-1, keepdim=True)
+-                ).any():
+-                    raise ValueError("Cached forward requires strictly new confirmed context positions")
++                if (
++                    context_length
++                    and previous.positions.numel()
++                    and (
++                        positions[:, :1]
++                        <= previous.positions.masked_fill(~previous.valid, -1).amax(
++                            -1, keepdim=True
++                        )
++                    ).any()
++                ):
++                    raise ValueError(
++                        "Cached forward requires strictly new confirmed context positions"
++                    )
+                 context_latent = torch.cat((previous.kv_latent, context_latent), 1)
+                 context_rope = torch.cat((previous.key_rope, context_rope), 1)
+                 positions = torch.cat((previous.positions, positions), 1)
+                 valid = torch.cat((previous.valid, valid), 1)
+                 documents = torch.cat((previous.document_ids, documents), 1)
+             cache_valid = valid & (positions < inputs.anchor_positions[:, :1])
+-            cache = MLALayerState(context_latent, context_rope, positions, cache_valid, documents)
++            cache = MLALayerState(
++                context_latent, context_rope, positions, cache_valid, documents
++            )
+             if self.window_size is not None:
+                 width = min(self.window_size, positions.size(1))
+-                indices = positions.masked_fill(~cache_valid, -1).argsort(1, descending=True)[:, :width].flip(-1)
++                indices = (
++                    positions.masked_fill(~cache_valid, -1)
++                    .argsort(1, descending=True)[:, :width]
++                    .flip(-1)
++                )
+                 cache = MLALayerState(
+-                    context_latent.gather(1, indices[..., None].expand(-1, -1, self.kv_lora_rank)),
+-                    context_rope.gather(1, indices[..., None].expand(-1, -1, self.qk_rope_head_dim)),
+-                    positions.gather(1, indices), cache_valid.gather(1, indices), documents.gather(1, indices),
++                    context_latent.gather(
++                        1, indices[..., None].expand(-1, -1, self.kv_lora_rank)
++                    ),
++                    context_rope.gather(
++                        1, indices[..., None].expand(-1, -1, self.qk_rope_head_dim)
++                    ),
++                    positions.gather(1, indices),
++                    cache_valid.gather(1, indices),
++                    documents.gather(1, indices),
+                 )
+             inputs.draft_state.layers[self.layer_idx] = cache
+         context_weights = (
+-            self.context_kv_b_proj.weight if self.separate_context else self.kv_b_proj.weight
+-        ).view(self.num_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank)
++            self.context_kv_b_proj.weight
++            if self.separate_context
++            else self.kv_b_proj.weight
++        ).view(
++            self.num_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank
++        )
+         draft_weights = self.kv_b_proj.weight.view(
+             self.num_heads, self.qk_nope_head_dim + self.v_head_dim, self.kv_lora_rank
+         )
+@@ -115,20 +149,33 @@
+             (context_latent, context_rope, context_weights),
+             (draft_latent, draft_rope, draft_weights),
+         ):
+-            absorbed_query = torch.einsum("bhqd,hdr->bhqr", query_nope, weights[:, :self.qk_nope_head_dim])
++            absorbed_query = torch.einsum(
++                "bhqd,hdr->bhqr", query_nope, weights[:, : self.qk_nope_head_dim]
++            )
+             scores.append(
+                 torch.einsum("bhqr,bsr->bhqs", absorbed_query, latent)
+                 + torch.einsum("bhqd,bsd->bhqs", query_rope, rope)
+             )
+         visibility = self.access(
+-            inputs, positions, valid, documents, query_length,
+-            **({"window_size": self.window_size} if self.window_size is not None else {}),
++            inputs,
++            positions,
++            valid,
++            documents,
++            query_length,
++            **(
++                {"window_size": self.window_size}
++                if self.window_size is not None
++                else {}
++            ),
+         )
+         query_visible = visibility.any(-1)
+         visibility[..., 0] |= ~query_visible
+-        probability = (torch.cat(scores, -1).float() * self.scaling).masked_fill(
+-            ~visibility, -torch.inf
+-        ).softmax(-1).to(query.dtype)
++        probability = (
++            (torch.cat(scores, -1).float() * self.scaling)
++            .masked_fill(~visibility, -torch.inf)
++            .softmax(-1)
++            .to(query.dtype)
++        )
+         context_probability, draft_probability = probability.split(
+             [context_latent.size(1), query_length], -1
+         )
+@@ -138,7 +185,9 @@
+             (draft_probability, draft_latent, draft_weights),
+         ):
+             latent_output = torch.einsum("bhqs,bsr->bhqr", attention, latent)
+-            contribution = torch.einsum("bhqr,hdr->bhqd", latent_output, weights[:, self.qk_nope_head_dim:])
++            contribution = torch.einsum(
++                "bhqr,hdr->bhqd", latent_output, weights[:, self.qk_nope_head_dim :]
++            )
+             output = contribution if output is None else output + contribution
+         output = output.transpose(1, 2).reshape(batch_size, query_length, -1)
+         return self.o_proj(output) * query_visible.transpose(1, 2).to(output.dtype)
+--- before/legospec/modeling/draft/composable/backbone/indexer.py
++++ after/legospec/modeling/draft/composable/backbone/indexer.py
+@@ -122,8 +122,14 @@
+         anchor = inputs.draft_embeddings.reshape(n, a, self.block_size, -1)[:, :, 0]
+         u = first_layer.input_norm(anchor)
+         attention = first_layer.self_attn
+-        source = attention.q_norm(
+-            attention.q_proj(u).reshape(n, a, -1, attention.head_dim)
++        source = (
++            attention._project_q(u).reshape(
++                n, a, attention.num_heads, attention.qk_head_dim
++            )
++            if hasattr(attention, "_project_q")
++            else attention.q_norm(
++                attention.q_proj(u).reshape(n, a, -1, attention.head_dim)
++            )
+         )
+         query = self.query_projection(source.flatten(-2).detach()).reshape(
+             n, a, self.heads, self.dim
+--- before/legospec/training/planning.py
++++ after/legospec/training/planning.py
+@@ -65,9 +65,11 @@
+                     loads[r],
+                     len(bins[r]),
+                     total_loads[r],
+-                    -sum(s.shard == sample.shard for s in bins[r])
+-                    if sample.shard is not None
+-                    else 0,
++                    (
++                        -sum(s.shard == sample.shard for s in bins[r])
++                        if sample.shard is not None
++                        else 0
++                    ),
+                     r,
+                 ),
+             )
+@@ -144,12 +146,14 @@
+             ).numel()
+         )
+         features = dict(
+-            target=float(
+-                (12 * length * h * h + 2 * length * length * h)
+-                * getattr(c, "num_target_layers", 1)
+-            )
+-            if self.online
+-            else 0.0,
++            target=(
++                float(
++                    (12 * length * h * h + 2 * length * length * h)
++                    * getattr(c, "num_target_layers", 1)
++                )
++                if self.online
++                else 0.0
++            ),
+             context=float(length * h * h),
+             backbone=0.0,
+             proposal=float(rows * h * v),
+@@ -157,17 +161,26 @@
+         )
+         for layer in r["backbone"]["layers"]:
+             attention, access = layer["attention"], layer.get("access", "dense")
++            if isinstance(attention, dict):
++                access = attention.get("access", "linear")
++                attention = attention["variant"]
+             pairs = float(k * anchors.sum() + a * k * k)
+             if access in ("sliding_window", "swa"):
+                 settings = r.get("access_configs", {}).get(access, {})
+-                window = settings.get("window_size", settings.get("window", 512))
++                window = (
++                    layer["attention"].get("window_size")
++                    if isinstance(layer["attention"], dict)
++                    else layer.get("window_size")
++                ) or settings.get("window_size", settings.get("window", 512))
+                 pairs = float(k * anchors.clamp(max=window).sum() + a * k * k)
+             if access == "dsa":
+                 settings = r.get("access_configs", {}).get("dsa", {})
+                 pairs = float(q * (settings.get("index_topk", 1024) + k))
+-            if attention in ("gdn", "gated_deltanet"):
++            if attention in ("gdn", "kda", "gated_deltanet"):
+                 # Ordered history updates and independent per-anchor query state.
+-                work = (length + q) * h * h
++                work = (length + q) * h * h + (
++                    a * k * k * h if isinstance(layer["attention"], dict) else 0
++                )
+             elif attention == "mla":
+                 settings = r.get("attention_configs", {}).get("mla", {})
+                 width = settings.get("kv_lora_rank", h)
+@@ -319,9 +332,7 @@
+             ids,
+             mask,
+             valid,
+-            sample_indices=[data["sample_index"]]
+-            if "sample_index" in data
+-            else None,
++            sample_indices=[data["sample_index"]] if "sample_index" in data else None,
+             block_size=self.config.block_size,
+             num_anchors=count,
+             seed=self.args.seed,
+--- before/tests/unit/test_attention_taxonomy.py
++++ after/tests/unit/test_attention_taxonomy.py
+@@ -8,127 +8,372 @@
+ from legospec.modeling.draft.composable.export import export_composable
+ 
+ 
+-def config(variant='gqa', access='full'):
+- family='linear' if variant in ('gdn','kda') else 'latent' if variant=='mla' else 'dense'
+- a=dict(family=family,variant=variant)
+- if family!='linear':a['access']=access
+- profile={}
+- if family=='linear':profile=dict(linear_num_key_heads=1,linear_num_value_heads=2,linear_key_head_dim=8,linear_value_head_dim=8,query_conv_kernel_size=2,context_conv_kernel_size=2)
+- if variant=='mla':profile=dict(num_attention_heads=2,num_key_value_heads=2,q_lora_rank=8,kv_lora_rank=8,qk_nope_head_dim=4,qk_rope_head_dim=4,v_head_dim=8)
+- ac={'dsa':dict(num_query_heads=2,head_dim=8,rope_head_dim=4,index_topk=2)} if access=='dsa' else {}
+- return LegoSpecConfig(hidden_size=16,intermediate_size=32,vocab_size=31,num_attention_heads=2,num_key_value_heads=1,head_dim=8,num_target_layers=4,block_size=4,execution_config={'gdn_backend':'reference'},composable_config=dict(context=dict(type='concat_projection',target_layer_ids=[0,2]),backbone=dict(type='layer_stack',layers=[dict(attention=a)]),attention_configs={variant:profile},access_configs=ac,proposal=dict(type='parallel'),objective=dict(type='hard_ce')))
++def config(variant="gqa", access="full"):
++    family = (
++        "linear"
++        if variant in ("gdn", "kda")
++        else "latent" if variant == "mla" else "dense"
++    )
++    a = dict(family=family, variant=variant)
++    if family != "linear":
++        a["access"] = access
++    profile = {}
++    if family == "linear":
++        profile = dict(
++            linear_num_key_heads=1,
++            linear_num_value_heads=2,
++            linear_key_head_dim=8,
++            linear_value_head_dim=8,
++            query_conv_kernel_size=2,
++            context_conv_kernel_size=2,
++        )
++    if variant == "mla":
++        profile = dict(
++            num_attention_heads=2,
++            num_key_value_heads=2,
++            q_lora_rank=8,
++            kv_lora_rank=8,
++            qk_nope_head_dim=4,
++            qk_rope_head_dim=4,
++            v_head_dim=8,
++        )
++    ac = (
++        {"dsa": dict(num_query_heads=2, head_dim=8, rope_head_dim=4, index_topk=2)}
++        if access == "dsa"
++        else {}
++    )
++    return LegoSpecConfig(
++        hidden_size=16,
++        intermediate_size=32,
++        vocab_size=31,
++        num_attention_heads=2,
++        num_key_value_heads=1,
++        head_dim=8,
++        num_target_layers=4,
++        block_size=4,
++        execution_config={"gdn_backend": "reference"},
++        composable_config=dict(
++            context=dict(type="concat_projection", target_layer_ids=[0, 2]),
++            backbone=dict(type="layer_stack", layers=[dict(attention=a)]),
++            attention_configs={variant: profile},
++            access_configs=ac,
++            proposal=dict(type="parallel"),
++            objective=dict(type="hard_ce"),
++        ),
++    )
++
+ 
+ def data():
+- return DraftInputs(target_hidden_states=torch.randn(1,7,32),draft_embeddings=torch.randn(1,8,16),anchor_positions=torch.tensor([[3,6]]),block_keep_mask=torch.ones(1,2,dtype=torch.bool),mode='features')
+-
+-@pytest.mark.parametrize('variant',['mha','gqa','mqa','mla','gdn','kda'])
+-def test_forward_backward_roundtrip(variant,tmp_path):
+- torch.manual_seed(42);torch.set_num_threads(1)
+- c=config(variant);m=LegoSpecModel(c);x=data();y=m(x).backbone_hidden_states
+- assert torch.isfinite(y).all();y.square().mean().backward()
+- if variant in ('gdn','kda'):
+-  block=m.backbone.layers[0].block_attention
+-  assert block.share_gdn_projections
+-  assert block.gate_proj.weight.grad is not None
+-  assert m.backbone.layers[0].mixer.in_proj_a.weight.grad is not None
+-  assert 'block_attention' not in json.dumps(c.to_dict())
+- c.save_pretrained(tmp_path);restored=LegoSpecConfig.from_pretrained(tmp_path)
+- assert restored.composable_config==c.composable_config
+- m.save_pretrained(tmp_path);loaded,info=LegoSpecModel.from_pretrained(tmp_path,output_loading_info=True)
+- assert not info['missing_keys'] and not info['unexpected_keys']
+- torch.testing.assert_close(loaded(x).backbone_hidden_states,y)
+-
+-@pytest.mark.parametrize('variant',['mha','gqa','mqa','mla'])
+-@pytest.mark.parametrize('access',['full','swa','dsa'])
+-def test_token_access(variant,access,monkeypatch):
+- torch.set_num_threads(1);torch.manual_seed(42)
+- c=config(variant,access);m=LegoSpecModel(c).eval();x=data()
+- y=m(x).backbone_hidden_states
+- assert torch.isfinite(y).all()
+- if access=='dsa':
+-  from dsa_reference import reference_attention
+-  from legospec.modeling.draft.composable.backbone.attention import sparse
+-  monkeypatch.setattr(sparse, 'gather_attention', reference_attention)
+-  ref=LegoSpecModel(c).eval();ref.load_state_dict(m.state_dict())
+-  torch.testing.assert_close(ref(x).backbone_hidden_states,y,atol=2e-6,rtol=2e-5)
+-
+-@pytest.mark.parametrize('variant',['gdn','kda'])
++    return DraftInputs(
++        target_hidden_states=torch.randn(1, 7, 32),
++        draft_embeddings=torch.randn(1, 8, 16),
++        anchor_positions=torch.tensor([[3, 6]]),
++        block_keep_mask=torch.ones(1, 2, dtype=torch.bool),
++        mode="features",
++    )
++
++
++@pytest.mark.parametrize("variant", ["mha", "gqa", "mqa", "mla", "gdn", "kda"])
++def test_forward_backward_roundtrip(variant, tmp_path):
++    torch.manual_seed(42)
++    torch.set_num_threads(1)
++    c = config(variant)
++    m = LegoSpecModel(c)
++    x = data()
++    y = m(x).backbone_hidden_states
++    assert torch.isfinite(y).all()
++    y.square().mean().backward()
++    if variant in ("gdn", "kda"):
++        block = m.backbone.layers[0].block_attention
++        assert block.share_gdn_projections
++        assert block.gate_proj.weight.grad is not None
++        assert m.backbone.layers[0].mixer.in_proj_a.weight.grad is not None
++        assert "block_attention" not in json.dumps(c.to_dict())
++    c.save_pretrained(tmp_path)
++    restored = LegoSpecConfig.from_pretrained(tmp_path)
++    assert restored.composable_config == c.composable_config
++    m.save_pretrained(tmp_path)
++    loaded, info = LegoSpecModel.from_pretrained(tmp_path, output_loading_info=True)
++    assert not info["missing_keys"] and not info["unexpected_keys"]
++    torch.testing.assert_close(loaded(x).backbone_hidden_states, y)
++
++
++@pytest.mark.parametrize("variant", ["mha", "gqa", "mqa", "mla"])
++@pytest.mark.parametrize("access", ["full", "swa", "dsa"])
++def test_token_access(variant, access, monkeypatch):
++    torch.set_num_threads(1)
++    torch.manual_seed(42)
++    c = config(variant, access)
++    m = LegoSpecModel(c).eval()
++    x = data()
++    y = m(x).backbone_hidden_states
++    assert torch.isfinite(y).all()
++    if access == "dsa":
++        from dsa_reference import reference_attention
++        from legospec.modeling.draft.composable.backbone.attention import sparse
++
++        monkeypatch.setattr(sparse, "gather_attention", reference_attention)
++        ref = LegoSpecModel(c).eval()
++        ref.load_state_dict(m.state_dict())
++        torch.testing.assert_close(
++            ref(x).backbone_hidden_states, y, atol=2e-6, rtol=2e-5
++        )
++
++
++@pytest.mark.parametrize("variant", ["gdn", "kda"])
+ def test_linear_cache_matches_full_prefix(variant):
+- torch.set_num_threads(1);torch.manual_seed(42)
+- m=LegoSpecModel(config(variant)).eval();context=torch.randn(1,7,32);emb=torch.randn(1,4,16)
+- def run(c,positions,anchor,state=None):
+-  x=DraftInputs(c,emb,torch.tensor([[anchor]]),torch.ones(1,1,dtype=torch.bool),context_position_ids=positions,draft_state=state,mode='features')
+-  return m(x)
+- state=DraftState()
+- run(context[:,:3],torch.arange(3)[None],3,state)
+- cached=run(context[:,3:6],torch.arange(3,6)[None],6,state)
+- full=run(context[:,:6],torch.arange(6)[None],6)
+- torch.testing.assert_close(cached.backbone_hidden_states,full.backbone_hidden_states,atol=2e-6,rtol=2e-5)
+-
+-@pytest.mark.parametrize('field,value',[('block_attention',{}),('access','full')])
+-def test_reject_legacy_layer_options(field,value):
+- c=config('gdn');c.composable_config['backbone']['layers'][0][field]=value
+- with pytest.raises(ValueError):c.validate_recipe()
++    torch.set_num_threads(1)
++    torch.manual_seed(42)
++    m = LegoSpecModel(config(variant)).eval()
++    context = torch.randn(1, 7, 32)
++    emb = torch.randn(1, 4, 16)
++
++    def run(c, positions, anchor, state=None):
++        x = DraftInputs(
++            c,
++            emb,
++            torch.tensor([[anchor]]),
++            torch.ones(1, 1, dtype=torch.bool),
++            context_position_ids=positions,
++            draft_state=state,
++            mode="features",
++        )
++        return m(x)
++
++    state = DraftState()
++    run(context[:, :3], torch.arange(3)[None], 3, state)
++    cached = run(context[:, 3:6], torch.arange(3, 6)[None], 6, state)
++    full = run(context[:, :6], torch.arange(6)[None], 6)
++    torch.testing.assert_close(
++        cached.backbone_hidden_states, full.backbone_hidden_states, atol=2e-6, rtol=2e-5
++    )
++
++
++@pytest.mark.parametrize("field,value", [("block_attention", {}), ("access", "full")])
++def test_reject_legacy_layer_options(field, value):
++    c = config("gdn")
++    c.composable_config["backbone"]["layers"][0][field] = value
++    with pytest.raises(ValueError):
++        c.validate_recipe()
++
+ 
+ def test_reject_linear_token_access():
+- c=config('kda');c.composable_config['backbone']['layers'][0]['attention']['access']='full'
+- with pytest.raises(ValueError):c.validate_recipe()
++    c = config("kda")
++    c.composable_config["backbone"]["layers"][0]["attention"]["access"] = "full"
++    with pytest.raises(ValueError):
++        c.validate_recipe()
++
+ 
+ def test_all_active_configs():
+- root=Path(__file__).resolve().parents[2]
+- for p in (root/'configs').glob('*.json'):
+-  d=json.loads(p.read_text())
+-  if 'composable_config' not in d:continue
+-  profiles=d['composable_config']['attention_configs'];dense=next((profiles[k] for k in ('gqa','mha','mqa') if k in profiles),{})
+-  c=LegoSpecConfig(hidden_size=2560,num_attention_heads=dense.get('num_attention_heads',32),num_key_value_heads=dense.get('num_key_value_heads',8),head_dim=dense.get('head_dim',128),num_target_layers=36,**{k:v for k,v in d.items() if k!='architectures'})
+-  c.runtime_config()
+-
+-@pytest.mark.parametrize('variant',['gdn','kda','mla'])
+-def test_standalone_export(variant,tmp_path):
+- from transformers import AutoModel
+- torch.set_num_threads(1);m=LegoSpecModel(config(variant)).eval();x=data()
+- export_composable(m,tmp_path)
+- loaded=AutoModel.from_pretrained(tmp_path,trust_remote_code=True,local_files_only=True).eval()
+- # Dynamic modules have separate dataclass identities; a fresh input is enough
+- # for noncached execution, which uses the same documented field contract.
+- torch.testing.assert_close(loaded(x).backbone_hidden_states,m(x).backbone_hidden_states)
+-
+-@pytest.mark.skipif(not torch.cuda.is_available(),reason='CUDA required')
+-def test_kda_fla_reference_outputs_state_and_gradients():
+- from fla.ops.kda import chunk_kda
+- from legospec.modeling.draft.composable.backbone.attention.gdn import reference_event_scan
+- torch.manual_seed(42);torch.set_num_threads(1)
+- q=torch.randn(1,24,1,32,device='cuda',dtype=torch.bfloat16,requires_grad=True)
+- k=torch.randn_like(q,requires_grad=True)
+- v=torch.randn(1,24,2,32,device='cuda',dtype=torch.bfloat16,requires_grad=True)
+- g=(-torch.rand(1,24,2,32,device='cuda')*.1).requires_grad_()
+- b=torch.rand(1,24,2,device='cuda',dtype=torch.bfloat16,requires_grad=True)
+- # Identity read events: no decay or writes, including consecutive block slots.
+- write=torch.ones(1,24,1,device='cuda');write[:,8:12]=0;write[:,20:24]=0
+- masked_g=g*write[...,None];masked_b=b*write
+- boundaries=torch.tensor([0,24],dtype=torch.int32)
+- initial=torch.randn(1,2,32,32,device='cuda')*.01
+- expected,state=reference_event_scan(q,k,v,masked_g,masked_b,boundaries,initial)
+- actual,last=chunk_kda(q,k,v,masked_g,masked_b,initial_state=initial,output_final_state=True,use_qk_l2norm_in_kernel=True,use_gate_in_kernel=False,use_beta_sigmoid_in_kernel=False)
+- torch.testing.assert_close(actual,expected,atol=.012,rtol=.05)
+- torch.testing.assert_close(last,state,atol=.015,rtol=.05)
+- tensors=(q,k,v,g,b)
+- grad1=torch.autograd.grad(actual.float().square().sum(),tensors,retain_graph=True)
+- grad2=torch.autograd.grad(expected.float().square().sum(),tensors)
+- for a,e in zip(grad1,grad2):
+-  assert torch.isfinite(a).all()
+-  torch.testing.assert_close(a,e,atol=.015,rtol=.1)
++    root = Path(__file__).resolve().parents[2]
++    for p in (root / "configs").glob("*.json"):
++        d = json.loads(p.read_text())
++        if "composable_config" not in d:
++            continue
++        profiles = d["composable_config"]["attention_configs"]
++        dense = next((profiles[k] for k in ("gqa", "mha", "mqa") if k in profiles), {})
++        c = LegoSpecConfig(
++            hidden_size=2560,
++            num_attention_heads=dense.get("num_attention_heads", 32),
++            num_key_value_heads=dense.get("num_key_value_heads", 8),
++            head_dim=dense.get("head_dim", 128),
++            num_target_layers=36,
++            **{k: v for k, v in d.items() if k != "architectures"},
++        )
++        c.runtime_config()
++
++
++@pytest.mark.parametrize("variant", ["gdn", "kda", "mla"])
++def test_standalone_export(variant, tmp_path):
++    from transformers import AutoModel
++
++    torch.set_num_threads(1)
++    m = LegoSpecModel(config(variant)).eval()
++    x = data()
++    export_composable(m, tmp_path)
++    loaded = AutoModel.from_pretrained(
++        tmp_path, trust_remote_code=True, local_files_only=True
++    ).eval()
++    # Dynamic modules have separate dataclass identities; a fresh input is enough
++    # for noncached execution, which uses the same documented field contract.
++    torch.testing.assert_close(
++        loaded(x).backbone_hidden_states, m(x).backbone_hidden_states
++    )
++
++
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
++@pytest.mark.parametrize("variant", ["gdn", "kda"])
++def test_linear_fla_reference_outputs_state_and_gradients(variant):
++    if variant == "kda":
++        from fla.ops.kda import chunk_kda as scan
++    else:
++        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as scan
++    from legospec.modeling.draft.composable.backbone.attention.gdn import (
++        reference_event_scan,
++    )
++
++    torch.manual_seed(42)
++    torch.set_num_threads(1)
++    q = torch.randn(
++        1, 24, 1, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True
++    )
++    k = torch.randn_like(q, requires_grad=True)
++    v = torch.randn(
++        1, 24, 2, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True
++    )
++    shape = (1, 24, 2, 32) if variant == "kda" else (1, 24, 2)
++    g = (-torch.rand(*shape, device="cuda") * 0.1).requires_grad_()
++    b = torch.rand(1, 24, 2, device="cuda", dtype=torch.bfloat16, requires_grad=True)
++    # Identity read events: no decay or writes, including consecutive block slots.
++    write = torch.ones(1, 24, 1, device="cuda")
++    write[:, 8:12] = 0
++    write[:, 20:24] = 0
++    masked_g = g * (write[..., None] if variant == "kda" else write)
++    masked_b = b * write
++    boundaries = torch.tensor([0, 24], dtype=torch.int32)
++    initial = torch.randn(1, 2, 32, 32, device="cuda") * 0.01
++    expected, state = reference_event_scan(
++        q, k, v, masked_g, masked_b, boundaries, initial
++    )
++    actual, last = scan(
++        q,
++        k,
++        v,
++        masked_g,
++        masked_b,
++        initial_state=initial,
++        output_final_state=True,
++        use_qk_l2norm_in_kernel=True,
++        use_gate_in_kernel=False,
++        use_beta_sigmoid_in_kernel=False,
++    )
++    torch.testing.assert_close(actual, expected, atol=0.012, rtol=0.05)
++    torch.testing.assert_close(last, state, atol=0.015, rtol=0.05)
++    tensors = (q, k, v, g, b)
++    grad1 = torch.autograd.grad(
++        actual.float().square().sum(), tensors, retain_graph=True
++    )
++    grad2 = torch.autograd.grad(expected.float().square().sum(), tensors)
++    for a, e in zip(grad1, grad2):
++        assert torch.isfinite(a).all()
++        torch.testing.assert_close(a, e, atol=0.015, rtol=0.1)
++
+ 
+ def test_mla_dsa_indexer_gradient_and_cached_prefix():
+- torch.manual_seed(42);torch.set_num_threads(1)
+- m=LegoSpecModel(config('mla','dsa'))
+- x=data();x.collect_indexer_teacher=True
+- out=m(x);aux=out.indexer_aux
+- assert aux is not None and aux.denominator>0
+- (out.backbone_hidden_states.square().mean()+aux.numerator/aux.denominator).backward()
+- for p in m.backbone.indexer.parameters():assert p.grad is not None and torch.isfinite(p.grad).all()
+- m.eval();state=DraftState();context=torch.randn(1,6,32);emb=torch.randn(1,4,16)
+- def run(start,end,state):
+-  return m(DraftInputs(context[:,start:end],emb,torch.tensor([[end]]),torch.ones(1,1,dtype=torch.bool),context_position_ids=torch.arange(start,end)[None],draft_state=state,mode='features'))
+- run(0,3,state);cached=run(3,6,state);full=run(0,6,None)
+- torch.testing.assert_close(cached.backbone_hidden_states,full.backbone_hidden_states,atol=2e-6,rtol=2e-5)
++    torch.manual_seed(42)
++    torch.set_num_threads(1)
++    m = LegoSpecModel(config("mla", "dsa"))
++    x = data()
++    x.collect_indexer_teacher = True
++    out = m(x)
++    aux = out.indexer_aux
++    assert aux is not None and aux.denominator > 0
++    (
++        out.backbone_hidden_states.square().mean() + aux.numerator / aux.denominator
++    ).backward()
++    for p in m.backbone.indexer.parameters():
++        assert p.grad is not None and torch.isfinite(p.grad).all()
++    m.eval()
++    state = DraftState()
++    context = torch.randn(1, 6, 32)
++    emb = torch.randn(1, 4, 16)
++
++    def run(start, end, state):
++        return m(
++            DraftInputs(
++                context[:, start:end],
++                emb,
++                torch.tensor([[end]]),
++                torch.ones(1, 1, dtype=torch.bool),
++                context_position_ids=torch.arange(start, end)[None],
++                draft_state=state,
++                mode="features",
++            )
++        )
++
++    run(0, 3, state)
++    cached = run(3, 6, state)
++    full = run(0, 6, None)
++    torch.testing.assert_close(
++        cached.backbone_hidden_states, full.backbone_hidden_states, atol=2e-6, rtol=2e-5
++    )
++
++
++@pytest.mark.parametrize("variant", ["gdn", "kda"])
++@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
++def test_linear_model_fla_forward_backward_and_cache(variant):
++    torch.manual_seed(42)
++    torch.set_num_threads(1)
++    c = config(variant)
++    p = c.composable_config["attention_configs"][variant]
++    p.update(linear_key_head_dim=32, linear_value_head_dim=32)
++    c.execution_config["gdn_backend"] = "fla"
++    model = LegoSpecModel(c).cuda().to(torch.bfloat16)
++    x = data()
++    x.target_hidden_states = x.target_hidden_states.cuda().bfloat16()
++    x.draft_embeddings = x.draft_embeddings.cuda().bfloat16()
++    x.anchor_positions = x.anchor_positions.cuda()
++    x.block_keep_mask = x.block_keep_mask.cuda()
++    y = model(x).backbone_hidden_states
++    y.float().square().mean().backward()
++    assert torch.isfinite(y).all()
++    assert torch.isfinite(model.backbone.layers[0].mixer.in_proj_a.weight.grad).all()
++    assert torch.isfinite(
++        model.backbone.layers[0].block_attention.gate_proj.weight.grad
++    ).all()
++    model.eval()
++    state = DraftState()
++    context = x.target_hidden_states[:, :6]
++    emb = x.draft_embeddings[:, :4]
++
++    def run(start, end, state):
++        return model(
++            DraftInputs(
++                context[:, start:end],
++                emb,
++                torch.tensor([[end]], device="cuda"),
++                torch.ones(1, 1, device="cuda", dtype=torch.bool),
++                context_position_ids=torch.arange(start, end, device="cuda")[None],
++                draft_state=state,
++                mode="features",
++            )
++        ).backbone_hidden_states
++
++    with torch.no_grad():
++        run(0, 3, state)
++        cached = run(3, 6, state)
++        full = run(0, 6, None)
++    torch.testing.assert_close(cached, full, atol=0.015, rtol=0.05)
++
++
++def test_mla_dsa_absorbed_cache_matches_expanded():
++    torch.manual_seed(42)
++    torch.set_num_threads(1)
++    model = LegoSpecModel(config("mla", "dsa")).eval()
++    x = data()
++    expanded = model(x).backbone_hidden_states
++    with torch.no_grad():
++        absorbed = model(x).backbone_hidden_states
++    torch.testing.assert_close(absorbed, expanded, atol=2e-6, rtol=2e-5)
++    state = DraftState()
++    context = torch.randn(1, 6, 32)
++    emb = torch.randn(1, 4, 16)
++
++    def run(start, end, state):
++        return model(
++            DraftInputs(
++                context[:, start:end],
++                emb,
++                torch.tensor([[end]]),
++                torch.ones(1, 1, dtype=torch.bool),
++                context_position_ids=torch.arange(start, end)[None],
++                draft_state=state,
++                mode="features",
++            )
++        ).backbone_hidden_states
++
++    with torch.no_grad():
++        run(0, 3, state)
++        cached = run(3, 6, state)
++        full = run(0, 6, None)
++    torch.testing.assert_close(cached, full, atol=2e-6, rtol=2e-5)
+--- before/tests/unit/test_gdn_shared_block_attention.py
++++ after/tests/unit/test_gdn_shared_block_attention.py
+@@ -338,11 +338,14 @@
+     )
+     new = root / "configs/dflash_gdn5_shared_block_attention_rnn.json"
+     recipe = json.loads(new.read_text())
+-    baseline_recipe = deepcopy(recipe)
+-    for layer in baseline_recipe["composable_config"]["backbone"]["layers"]:
++    from legospec.modeling.draft.composable.schema import _execution_recipe
++
++    baseline_config = _execution_recipe(LegoSpecConfig(**recipe, **common))
++    del baseline_config._intrinsic_linear_attention
++    for layer in baseline_config.composable_config["backbone"]["layers"]:
+         del layer["block_attention"]
+     with torch.device("meta"):
+-        baseline = LegoSpecModel(LegoSpecConfig(**baseline_recipe, **common))
++        baseline = LegoSpecModel(baseline_config)
+         shared = LegoSpecModel(LegoSpecConfig(**recipe, **common))
+     count = lambda model: sum(p.numel() for p in model.parameters())
+     assert count(shared) - count(baseline) == 5 * (2560 * 32 + 32) == 409760
+--- before/tests/unit/test_gdn_block_attention.py
++++ after/tests/unit/test_gdn_block_attention.py
+@@ -335,9 +335,9 @@
+     for layer in layers:
+         assert layer["attention"] == dict(representation="gdn", access="linear")
+         assert layer["local_operator"] == dict(type="none")
+-        assert layer["block_attention"] == dict(
+-            num_heads=32, head_dim=128, gate_init=0.1, share_gdn_projections=True
+-        )
++        assert "block_attention" not in layer
++        assert layer["gdn_config"]["intrinsic_block_attention"] is True
++        assert layer["gdn_config"]["gate_init"] == 0.1
+         assert layer["gdn_config"]["query_conv_kernel_size"] == 2
+         assert layer["gdn_config"]["context_conv_kernel_size"] == 4
+     assert recipe["proposal"] == dict(type="rnn", rank=256)
+@@ -358,17 +358,10 @@
+         head_dim=128,
+     )
+     layers = c.runtime_config().composable_config["backbone"]["layers"]
+-    assert ["block_attention" in layer for layer in layers] == [
+-        count == 4,
+-        True,
+-        True,
+-        True,
+-        False,
+-    ]
++    assert all("block_attention" not in layer for layer in layers)
++    assert all(layer["gdn_config"]["intrinsic_block_attention"] for layer in layers[:4])
+     assert layers[-1]["attention"]["representation"] == "gqa"
+-    assert layers[1]["block_attention"] == dict(
+-        num_heads=32, head_dim=32, gate_init=0.1
+-    )
++    assert layers[1]["gdn_config"]["gate_init"] == 0.1
+ 
+ 
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+--- before/docs/ATTENTION_CONFIG.md
++++ after/docs/ATTENTION_CONFIG.md
+@@ -42,3 +42,15 @@
+ 历史 string attention 配方继续按原结构读取，包括原先可选的 block 分支，避免悄悄增加权重。
+ 旧 checkpoint、model_publish、训练快照和缓存未迁移；继续训练必须使用原始配置与完整训练状态。
+ 新配方不允许把 block attention 单独配置。
++
++## H800 环境
++
++Torch 2.9.1 自带 Triton 3.5.1；当前 FLA 在 Hopper 上禁止该 Triton 版本的
++GDN gated backward，以免数值错误。`hopper` extra 提供 `tilelang==0.1.15`，
++由 FLA 官方 backend dispatch 选择，不关闭上游数值保护，也不切到 CPU。
++
++H800_2 已验证的开源项目环境为：
++`/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002`。
++它通过 .pth 复用原有 Torch/CUDA/FLA 等大型依赖，仅在独立 site-packages 安装
++TileLang 0.1.15、apache-tvm-ffi 0.1.12、ml-dtypes 0.7.0、z3-solver 4.15.4.0。
++原共享环境未修改；此环境仍依赖原共享环境的存在。使用新环境的 Python 执行本项目。
+--- before/configs/README.md
++++ after/configs/README.md
+@@ -0,0 +1,3 @@
++# Model recipes
++
++See [attention families and access](../docs/ATTENTION_CONFIG.md). Maintained JSON recipes use the family/variant/access interface. Historical checkpoint recipes must be loaded from their original snapshot.
+--- before/README.md
++++ after/README.md
+@@ -6,6 +6,7 @@
+ 
+ - [Architecture and code organization](docs/COMPONENT_ORGANIZATION.md)
+ - [Completed simplification plan](docs/SIMPLIFICATION_PLAN.md)
++- [Attention families and access](docs/ATTENTION_CONFIG.md)
+ - [Execution options](docs/training-execution.md)
+ - [Selected optimization versions](docs/VERSION_BRANCH_REVIEW.md)
+ 
+--- before/docs/COMPONENT_ORGANIZATION.md
++++ after/docs/COMPONENT_ORGANIZATION.md
+@@ -3,7 +3,7 @@
+ 四个可组合轴共享训练、数据、目标模型、分布式与推理设施。公开类为 `LegoSpecModel`、`LegoSpecConfig`，Python 包为 `legospec`。
+ 
+ - Context：`modeling/draft/composable/context/fusion.py`。`concat_projection` 控制投影及可选归一化；`gated_fusion` 控制逐层融合。只负责目标特征融合。
+-- Backbone：`backbone/model.py` 中唯一的 `Backbone` 和 `Layer`。GQA、MLA、GDN 数学归 `backbone/attention/`；卷积归 `backbone/convolution.py`。MHA/MQA 是 GQA 的头数配置。
++- Backbone：`backbone/model.py` 中唯一的 `Backbone` 和 `Layer`。Dense（MHA/GQA/MQA）、latent（MLA）、linear（GDN/KDA）数学归 `backbone/attention/`；卷积归 `backbone/convolution.py`。Dense/latent 的历史访问独立选择 full/swa/dsa，GDN/KDA 内置共享投影与逐头 gate block attention。详见 ATTENTION_CONFIG.md。
+ - Proposal：`proposal/parallel.py`、`markov.py`、`selector.py`、`sequential.py`。共享主干输出，保留 additive RNN、serial replacement、候选集与全词表残差的数学区别。
+ - Objective：`objective/` 下的 token、block、survival、composition、DPAL，以及词表投影缓存与损失内核。独立输出分子/分母，统一训练器负责归约。
+ 
+--- before/legospec/modeling/draft/composable/backbone/attention/DESIGN.md
++++ after/legospec/modeling/draft/composable/backbone/attention/DESIGN.md
+@@ -1,6 +1,6 @@
+ # attention
+ 
+-gqa.py/mla.py 使用 common.py 的投影、RoPE 原语和 base.py 的公共 attention 执行。access.py 定义 dense/sliding/DSA/indexed 可见性；sparse.py 保留真实稀疏执行；gdn.py、gdn_events.py、gdn_state.py、gdn_cache.py 分别负责递归数学、事件布局、状态和确认前缀提交；Flex 与 scan kernel 保持独立可选依赖。
++gqa.py/mla.py 使用 common.py 的投影、RoPE 原语和 base.py 的公共 attention 执行。access.py 定义 dense/sliding/DSA/indexed 可见性；sparse.py 保留真实稀疏执行；gdn.py 同时实现 GDN 每头 decay 与 KDA 每 key 通道 decay，linear 固定共享投影与逐头 gate block attention；gdn.py、gdn_events.py、gdn_state.py、gdn_cache.py 分别负责递归数学、事件布局、状态和确认前缀提交；Flex 与 scan kernel 保持独立可选依赖。
+ 
+ 当前文件：`access.py`, `base.py`, `block.py`, `common.py`, `flex.py`, `gdn.py`, `gdn_cache.py`, `gdn_events.py`, `gdn_state.py`, `gqa.py`, `mla.py`, `sparse.py`, `torch_compat.py`
+ 
+--- before/AGENTS.md
++++ after/AGENTS.md
+@@ -94,3 +94,12 @@
+ 关键变量按所属轴和实际含义命名，如 target_hidden_states、context_hidden_states、backbone_state、proposal_output、loss_numerator。
+ 跨模块不使用含糊的单字母或 data/features 名称；局部数学 q/k/v 可保留。
+ 关键公共名称有多个合理方案时先向用户列出候选，普通局部变量自行使用清晰名称。
++
++Default development host (user instruction, 2026-11-22): perform LEGOSpec code
++changes and verification directly on SSH host H800_2. Follow later explicit host
++instructions. Inspect the intended remote project before editing and preserve its
++existing changes; do not overwrite them with an older local checkout.
++
++The main development repository is `/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public` on H800_2 (confirmed 2026-11-22).
++
++Use `/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/bin/python` for this main project; it includes the TileLang backend required by GDN training on Hopper with the current Torch/Triton versions.
+--- before/.cursor/rules/h800-workspace.mdc
++++ after/.cursor/rules/h800-workspace.mdc
+@@ -8,3 +8,7 @@
+ Inspect the intended remote project and its instructions before editing. Preserve
+ remote changes; do not overwrite them with an older local checkout. Use existing
+ model, dataset and checkpoint caches in place, respecting task-specific host choices.
++
++The main development repository is `/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public` on H800_2 (confirmed 2026-11-22).
++
++Use `/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/bin/python` for this main project; it includes the TileLang backend required by GDN training on Hopper with the current Torch/Triton versions.
+--- before/pyproject.toml
++++ after/pyproject.toml
+@@ -43,6 +43,8 @@
+ Issues = "https://github.com/alexwhz-sjtu/LEGOSpec/issues"
+ 
+ [project.optional-dependencies]
++# FLA gated-delta backward on Hopper with the Torch 2.9 Triton pin.
++hopper = ["tilelang==0.1.15; sys_platform == linux"]
+ fa = ["flash-attn"]
+ cu128 = ["torch==2.9.1", "torchaudio==2.9.1", "torchvision==0.24.1"]
+ cu130 = ["torch==2.9.1", "torchaudio==2.9.1", "torchvision==0.24.1", "sgl-kernel==0.3.21"]

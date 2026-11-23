@@ -1,0 +1,97 @@
+[
+  {
+    "source": "legospec/modeling/draft/composable/loss_config.py",
+    "archive": "development/objectives/snapshots/legospec/modeling/draft/composable/loss_config.py",
+    "sha256": "a49e6dde93e5e46fccd223d8555f091186edbd998e273242cf8731053da425da"
+  },
+  {
+    "source": "legospec/modeling/draft/composable/schema.py",
+    "archive": "development/objectives/snapshots/legospec/modeling/draft/composable/schema.py",
+    "sha256": "acb51ffeae28219ad7b12ed417524640a3e24ade3e0f9e6be5ddf9a9b008c3dc"
+  },
+  {
+    "source": "legospec/modeling/draft/composable/objective/__init__.py",
+    "archive": "development/objectives/snapshots/legospec/modeling/draft/composable/objective/__init__.py",
+    "sha256": "20701aedcfee0b4b8805ad725b0232a62acaa8422d5e4990ebb2a861d2095020"
+  },
+  {
+    "source": "legospec/modeling/draft/composable/objective/dpal.py",
+    "archive": "development/objectives/snapshots/legospec/modeling/draft/composable/objective/dpal.py",
+    "sha256": "8f97c8335e50557161df7a0bd970f567cc4fa147daac36278c0b8be256c3d54a"
+  },
+  {
+    "source": "legospec/modeling/draft/composable/objective/survival.py",
+    "archive": "development/objectives/snapshots/legospec/modeling/draft/composable/objective/survival.py",
+    "sha256": "2a3998961d1b9a9ff1116a253c1ea85a88fa1ff484db9f06e365410c451c0801"
+  },
+  {
+    "source": "legospec/training/anchor_opd.py",
+    "archive": "development/objectives/snapshots/legospec/training/anchor_opd.py",
+    "sha256": "89faa47873aca69f72e1b9376a85c263b026ab4aa6d07115b4f78c8304b1d4c1"
+  },
+  {
+    "source": "legospec/training/setup.py",
+    "archive": "development/objectives/snapshots/legospec/training/setup.py",
+    "sha256": "f499bbeddb8ebe9e8c863014b0ee61b0aab2f4d78d34ab00e8381cc85e4a71f3"
+  },
+  {
+    "source": "tests/unit/test_dpal_plus_plus.py",
+    "archive": "tests/development/objectives/snapshots/tests/unit/test_dpal_plus_plus.py",
+    "sha256": "c5f46f90c499cfaa32e8145e19f4b612f839f5e9dc4df3e16f36e56cc20c2f79"
+  },
+  {
+    "source": "tests/unit/test_dpal_renyi.py",
+    "archive": "tests/development/objectives/snapshots/tests/unit/test_dpal_renyi.py",
+    "sha256": "74b2383bcffb278c3b14b552ac1924801c7fffc9cb37c6138d7ee1e1e6438b08"
+  },
+  {
+    "source": "tests/unit/test_vocab_reuse.py",
+    "archive": "tests/development/objectives/snapshots/tests/unit/test_vocab_reuse.py",
+    "sha256": "9d035b7ab859bf9eb8d0e45f9701799bb941c2b6f46a1a3ad3043c59b7def384"
+  },
+  {
+    "source": "tests/unit/test_composable_eagle3.py",
+    "archive": "tests/development/objectives/snapshots/tests/unit/test_composable_eagle3.py",
+    "sha256": "a5c72819156bbfce7e5ab97deeec9134ae69cdc4273fc5da9d5921933d8f1fb7"
+  },
+  {
+    "source": "tests/unit/test_anchor_opd.py",
+    "archive": "tests/development/objectives/snapshots/tests/unit/test_anchor_opd.py",
+    "sha256": "780fcc3b285f68cf547048f2124211e8c414e22aab9d16e8785997e2ba786bea"
+  },
+  {
+    "source": "configs/27__dflash__gqa5_dense__rnn_r256__opd_survival_b1_d0p8_w1.json",
+    "archive": "development/objectives/configs/27__dflash__gqa5_dense__rnn_r256__opd_survival_b1_d0p8_w1.json",
+    "sha256": "61a9f4978818deade88bc9ab215f98ea76c60fd8f3e7a9fd9166e1c87cd658c1"
+  },
+  {
+    "source": "configs/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1.json",
+    "archive": "development/objectives/configs/26__dflash__gqa5_dense__parallel__opd_survival_b1_d0p8_w1.json",
+    "sha256": "86c687910fb319bd322f68ed0dd9bd511beda28e8799ee570067a63a7262a90b"
+  },
+  {
+    "source": "scripts/config/anchor_opd_cached_hidden.yaml",
+    "archive": "development/objectives/scripts/config/anchor_opd_cached_hidden.yaml",
+    "sha256": "51ddb5418deeb4f2c745d8004d84d711166c3e17ead14b309c75525d0d5d50a0"
+  },
+  {
+    "source": "scripts/config/offline_dflare_parallel_tv_survival.yaml",
+    "archive": "development/objectives/scripts/config/offline_dflare_parallel_tv_survival.yaml",
+    "sha256": "c09fa73c4a45ed8c2abbff4d1bf3d741c368697e70a2a3095ec100e8b0ec37f3"
+  },
+  {
+    "source": "scripts/config/anchor_opd_online_hidden.yaml",
+    "archive": "development/objectives/scripts/config/anchor_opd_online_hidden.yaml",
+    "sha256": "129989d0ba8681157c3bb344146f612622559a913a5f248143eb5af5f587a68d"
+  },
+  {
+    "source": "scripts/config/anchor_comparison_opd_rnn.yaml",
+    "archive": "development/objectives/scripts/config/anchor_comparison_opd_rnn.yaml",
+    "sha256": "8a669bff2bd5f2b41aa63ee0d9487ade8412e7f3ceea220d41af811d5040fb9a"
+  },
+  {
+    "source": "legospec/training/component_reduction.py",
+    "archive": "development/objectives/snapshots/legospec/training/component_reduction.py",
+    "sha256": "235a8cc10b161afc555517930b348060a9e36502e55854e22f9eddf94095be78"
+  }
+]

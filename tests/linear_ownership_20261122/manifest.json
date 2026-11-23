@@ -1,0 +1,62 @@
+[
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/base.py",
+    "before_sha256": null,
+    "after_sha256": "c834451c91849e9763dbf5c15f1828e4b55ea95284298d98a1b2352c3aa5250f"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/DESIGN.md",
+    "before_sha256": "1dab1f0505756a4a5f15ba5051373a9ec7ddb1ec03976f7f39cc73f53fec76e4",
+    "after_sha256": "777296d384cf9c62c864e0a42629be0d80bfd7ff9edc9439944e7aa3909cdfca"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/dense.py",
+    "before_sha256": "9cfb1a063cc16410327974150447f10a8bd204041fb1790ec47bcbb8ebd9870c",
+    "after_sha256": "f866a6b5c5c8f6a7b2de8a186d3beb3f280af39c91244ed43fc224ce50ab3ef0"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/latent.py",
+    "before_sha256": "99f6c8e4fa5091bc109286105aa74c1a7002db0204848404e6529663e82a1ab1",
+    "after_sha256": "7cea681f1af5d31e256da17055aed2648b3e332ef86225d2561c64e51685c70c"
+  },
+  {
+    "path": "tests/unit/test_mla_absorb.py",
+    "before_sha256": "d2bfb9d1ad5b66b7a530407636724eb93df32e6490a2c1adaabae24748bf7248",
+    "after_sha256": "32e3a55d06232e97fcc476bb5662e3da30daf6fb218d3259da88c990c47e4176"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/linear/recurrence.py",
+    "before_sha256": "2dec489226b8cf52405a16c803129b1c41ef5238f4ce6ffd5484569e828578a9",
+    "after_sha256": "84751f4094ad1ffcef6a878dcb146968c77007b2b2250cfbc1d242ac7052b76b"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/model.py",
+    "before_sha256": "f052c73a41a55f1be522afda52ed196d5a925cca14afb26034fc5404056100ff",
+    "after_sha256": "1ae2d9a0006f90a5388b907c1fd5049b1a4a345f58b706fcbcda737eb1e0a707"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/linear/DESIGN.md",
+    "before_sha256": "a2a56abfab96c2f32f57f412efa1936d9de2dcae2a42d3ac0c16cfff1fa4c34f",
+    "after_sha256": "66a9fecc449f1eb443afa6e7d6e4924ca735a418e80604cc6c9a439d89b4e3c0"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/DESIGN.md",
+    "before_sha256": "8dad6e2d26d2a0f3672bd249edf632599f3dd9909c95280fdac9a1e3b63c1c5f",
+    "after_sha256": "a982b140e9b52342495dca75d3d21b48cc3e5274b90f6a03e15186f33644cf26"
+  },
+  {
+    "path": "docs/COMPONENT_ORGANIZATION.md",
+    "before_sha256": "0c49f75c5e89ecbed9b4596d533a0bc0dec17901014be2f106aaa710c3fa6a01",
+    "after_sha256": "35ba735361f93bf8384758ff138d323f50bd99106e995ae76810e1fc93501f17"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/linear/block.py",
+    "before_sha256": "58fbeea42b2a11b3f2f3021dbc2d45b706aa2ad483584113e2ab1d98b1f53f8b",
+    "after_sha256": "e008719441282b197efaeb577254a181390e73455a328ae3ac932ad22392bd16"
+  },
+  {
+    "path": "legospec/modeling/draft/composable/backbone/attention/softmax.py",
+    "before_sha256": "c834451c91849e9763dbf5c15f1828e4b55ea95284298d98a1b2352c3aa5250f",
+    "after_sha256": null
+  }
+]

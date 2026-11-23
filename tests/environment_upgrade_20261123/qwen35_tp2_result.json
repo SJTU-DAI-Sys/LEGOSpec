@@ -1,0 +1,10 @@
+{
+  "mode": "qwen35_tp2",
+  "layers": [
+    1,
+    39
+  ],
+  "online_offline_equal": true,
+  "teacher_head_equal": true,
+  "backward": true
+}

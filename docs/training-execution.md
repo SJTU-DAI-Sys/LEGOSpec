@@ -49,13 +49,15 @@ bounded acceptance-metric memory, and fused soft-CE reductions are shared by bot
 modes. `legacy` is the padded execution profile, not a byte-for-byte historical
 source rollback. Historical experiments use their frozen source copies.
 
-## Checkpoint compatibility
+## Checkpoint restore
 
-Optimized checkpoints store `execution_contract=composable_packed_v1` and the
-pending scheduler plan/committed cursor, in addition to full optimizer/scheduler,
-FP32 parameters and per-rank RNG. Resume using the original configuration and
-rank topology. Changing legacy/optimized requires `init_from` as a new run;
-`resume_from` rejects the mismatch. Never resume the same run from weights only.
+Checkpoints save the pending planner window, committed cursor, optimizer,
+scheduler, FP32 master parameters and per-rank RNG. Restore reads the current
+rank's state directly, using the original training configuration and rank topology.
+There are no version tags, configuration identity comparisons or old-format
+adapters. Development updates support only the current implementation unless
+backward compatibility is explicitly requested. Weights-only exports remain
+for inference or `init_from`, not full training resume.
 
 ## Validation
 

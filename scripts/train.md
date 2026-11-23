@@ -49,7 +49,7 @@ requires `tp_size: 1` and `shard_draft_by_tp: false`.
 export WANDB_MODE=offline
 /inspire/hdd/project/inference-chip/xujiaming-253308120313/whz/stop_keeper.sh
 
-cd /inspire/hdd/project/inference-chip/xujiaming-253308120313/whz/LiteSpec
+cd /inspire/hdd/project/inference-chip/xujiaming-253308120313/whz/LEGOSpec
 source .venv/bin/activate
 
 bash scripts/dlite/run_training_dlite_sft.sh scripts/config/dlite_sft.yaml > "whz_mtp_logs/train_dlite_$(date +%Y%m%d_%H%M%S).log" 2>&1 &

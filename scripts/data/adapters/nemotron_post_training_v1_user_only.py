@@ -1,4 +1,5 @@
 """Extract original user turns from Nemotron Post-Training Dataset v1."""
+
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,4 +20,8 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
             if not isinstance(content, str):
                 raise ValueError(f"message {index} user content must be text")
             users.append({"role": "user", "content": content})
-    return {"messages": users, "source": "nv-community/Nemotron-Post-Training-Dataset-v1", "category": row.get("category")}
+    return {
+        "messages": users,
+        "source": "nv-community/Nemotron-Post-Training-Dataset-v1",
+        "category": row.get("category"),
+    }

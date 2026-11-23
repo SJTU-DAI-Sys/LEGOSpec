@@ -1,46 +1,29 @@
 # LEGOSpec
 
-A composable framework for training and evaluating speculative draft models.
-The Python package remains named `litespec` for import and checkpoint compatibility.
+Composable speculative draft models built from **Context, Backbone, Proposal and Objective**, with shared training, data, distributed and inference facilities.
 
-## Source layout
+Public API: `from legospec import LegoSpecModel, LegoSpecConfig`.
 
-- `litespec/`: model components, composable recipes, training and inference.
-- `scripts/`: training, data preparation and YAML launchers.
-- `configs/`: draft recipes and benchmark configurations.
-- `docs/`: component organization and execution-mode documentation.
-- `tests/unit/`: maintained tests.
-- `tests/reference/`: pinned numerical/export oracles used only by tests.
-- `model_publish/`: the separately prepared Gemma DFlash2 weight release.
+- [Architecture and code organization](docs/COMPONENT_ORGANIZATION.md)
+- [Completed simplification plan](docs/SIMPLIFICATION_PLAN.md)
+- [Attention families and access](docs/ATTENTION_CONFIG.md)
+- [Execution options](docs/training-execution.md)
+- [Selected optimization versions](docs/VERSION_BRANCH_REVIEW.md)
 
-The concrete DFlash, DFlash2, DSpark and DLite entry points and Composable
-import attention, convolution and proposal components from independent shared
-modules. See [code organization](docs/code-organization.md).
+Use `python -m scripts.composable.train` or `scripts/composable/run_training_composable.sh CONFIG.yaml`.
+Algorithms are recipes; there are no standalone full-algorithm implementations. Supported combinations are checked by the schema. Hidden caches use raw tar only.
 
-## Development
-
-Use Python 3.11 and the dependencies in `pyproject.toml`. From this directory:
+Dependencies are pinned in `pyproject.toml` and `uv.lock`; testing tools are centralized in the `test` dependency group. See [SGLang runtime and installation](docs/SGLANG_RUNTIME.md) for the CUDA 13 environment.
 
 ```sh
-CUDA_VISIBLE_DEVICES= OMP_NUM_THREADS=1 python -m pytest tests/unit -q
+OMP_NUM_THREADS=1 python -m pytest tests/unit -q
 ```
 
-Dependencies must already be installed in the selected environment. Test results
-and the exact environment used for this migration are recorded under
-`tests/artifacts/public_source_migration_20261121/`.
+Set `CUDA_VISIBLE_DEVICES` to available devices for CUDA coverage, or an empty value for CPU coverage. Generated test files stay in `tests/artifacts`.
+Keep `training_mode: legacy | optimized`. New launchers explicitly save every 15,000 optimizer steps and final weights, with full training state for resume.
 
-Launch composable training with `python -m scripts.composable.train`, or use
-`scripts/composable/run_training_composable.sh CONFIG.yaml`.
+`model_publish` is a separate native-format weight release. Its config and weights are not implicitly converted by this source refactor. Active training snapshots, caches and checkpoints remain in their existing locations.
 
-Retain the overall `training_mode: legacy | optimized` switch; `legacy` is
-the default. See [training execution](docs/training-execution.md) for packed
-execution, scheduling, checkpoint and resume contracts. Training launchers
-must specify their own model, data, output paths and rank topology.
+Publication license/version provenance remains documented in [publication notes](docs/publication-notes.md).
 
-This iteration tree was populated from the maintained H800_2 framework on
-2026-11-21. Historical experiments, active run snapshots, caches and training
-checkpoints remain at their existing locations. New development takes place
-in this directory. The earlier source tree is retained for path compatibility.
-
-See [publication metadata](docs/publication-notes.md) for the inherited license
-and version metadata that still need reconciliation before a public package release.
+OPD training is deferred under [development/opd](development/opd/README.md) and is not supported by the current training entrypoint.

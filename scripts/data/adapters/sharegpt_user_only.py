@@ -12,10 +12,16 @@ def extract(row: Mapping[str, Any]) -> dict[str, Any]:
     for index, message in enumerate(conversations):
         if not isinstance(message, Mapping):
             raise ValueError(f"message {index} must be an object")
-        role_key, text_key = ("role", "content") if "role" in message else ("from", "value")
+        role_key, text_key = (
+            ("role", "content") if "role" in message else ("from", "value")
+        )
         role = message[role_key]
         if not isinstance(role, str) or not role.strip():
             raise ValueError(f"message {index} has an invalid role")
         if role.strip().lower() in {"user", "human"}:
             messages.append({"role": "user", "content": message[text_key]})
-    return {"messages": messages, "source": row.get("source"), "category": row.get("category")}
+    return {
+        "messages": messages,
+        "source": row.get("source"),
+        "category": row.get("category"),
+    }

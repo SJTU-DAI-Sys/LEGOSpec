@@ -1,6 +1,6 @@
-"""Train via the shared LiteSpec runner."""
+"""Train via the shared LEGOSpec runner."""
 
-from litespec.training import run_training
+from legospec.training import run_training
 
 if __name__ == "__main__":
-    run_training("composable")
+    run_training()

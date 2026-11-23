@@ -1,0 +1,18 @@
+{
+  "gqa": {
+    "forward": "bitwise_equal",
+    "gradients": "bitwise_equal"
+  },
+  "mla": {
+    "forward": "bitwise_equal",
+    "gradients": "bitwise_equal"
+  },
+  "gdn": {
+    "forward": "bitwise_equal",
+    "gradients": "bitwise_equal"
+  },
+  "kda": {
+    "forward": "bitwise_equal",
+    "gradients": "bitwise_equal"
+  }
+}

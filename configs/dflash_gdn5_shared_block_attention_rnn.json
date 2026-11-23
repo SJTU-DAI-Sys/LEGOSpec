@@ -1,12 +1,11 @@
 {
   "architectures": [
-    "ComposableDraftModel"
+    "LegoSpecModel"
   ],
   "block_size": 8,
-  "schema_version": "composable_v3",
   "composable_config": {
     "context": {
-      "type": "dflash",
+      "type": "concat_projection",
       "target_layer_ids": [
         1,
         9,
@@ -19,68 +18,48 @@
       "type": "layer_stack",
       "layers": [
         {
-          "attention": "gdn",
-          "access": "linear",
+          "attention": {
+            "family": "linear",
+            "variant": "gdn"
+          },
           "local_operator": {
             "type": "none"
-          },
-          "block_attention": {
-            "num_heads": 32,
-            "head_dim": 128,
-            "gate_init": 0.1,
-            "share_gdn_projections": true
           }
         },
         {
-          "attention": "gdn",
-          "access": "linear",
+          "attention": {
+            "family": "linear",
+            "variant": "gdn"
+          },
           "local_operator": {
             "type": "none"
-          },
-          "block_attention": {
-            "num_heads": 32,
-            "head_dim": 128,
-            "gate_init": 0.1,
-            "share_gdn_projections": true
           }
         },
         {
-          "attention": "gdn",
-          "access": "linear",
+          "attention": {
+            "family": "linear",
+            "variant": "gdn"
+          },
           "local_operator": {
             "type": "none"
-          },
-          "block_attention": {
-            "num_heads": 32,
-            "head_dim": 128,
-            "gate_init": 0.1,
-            "share_gdn_projections": true
           }
         },
         {
-          "attention": "gdn",
-          "access": "linear",
+          "attention": {
+            "family": "linear",
+            "variant": "gdn"
+          },
           "local_operator": {
             "type": "none"
-          },
-          "block_attention": {
-            "num_heads": 32,
-            "head_dim": 128,
-            "gate_init": 0.1,
-            "share_gdn_projections": true
           }
         },
         {
-          "attention": "gdn",
-          "access": "linear",
+          "attention": {
+            "family": "linear",
+            "variant": "gdn"
+          },
           "local_operator": {
             "type": "none"
-          },
-          "block_attention": {
-            "num_heads": 32,
-            "head_dim": 128,
-            "gate_init": 0.1,
-            "share_gdn_projections": true
           }
         }
       ]
@@ -103,9 +82,7 @@
         }
       ]
     },
-    "access_configs": {
-      "linear": {}
-    },
+    "access_configs": {},
     "attention_configs": {
       "gdn": {
         "linear_num_key_heads": 16,
@@ -114,7 +91,8 @@
         "linear_value_head_dim": 128,
         "query_conv_kernel_size": 2,
         "context_conv_kernel_size": 4,
-        "query_conv_mode": "block"
+        "query_conv_mode": "block",
+        "gate_init": 0.1
       }
     }
   }

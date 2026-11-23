@@ -1,3 +1,28 @@
+代码风格要求：
+防过度防御（不要杞人忧天）
+
+要求：对于几乎不可能发生的边界情况或并发问题，不能擅自写一堆防御性代码。必须先把发生概率讲清楚，经用户确认后才能加。
+不合规定的输入错误允许他报错。
+禁令：严禁为了追求“理论上更稳”而擅自增加膨胀代码。
+
+入口单次校验（信任内部类型系统）
+
+要求：外部传入的数据，只在系统边界（入口）做一次校验。到了系统内部，就完全依靠静态类型系统来保证流转。
+
+禁令：禁止在内部的每一层函数里都重复写校验逻辑（层层重复判断）。
+
+拒绝提前抽象（不要为了封装而封装）
+
+要求：只被使用一次的代码逻辑，就直接就近写在那里（内联）。
+
+禁令：不要随意提前把单次逻辑拆分出去，做成毫无意义的 helper 函数或工具类。
+
+控制复杂度（保持简单直接）
+
+要求：能用单个函数清晰明了搞定的逻辑，就写在一个函数里。
+
+禁令：非必要不要滥用 try/catch（异常捕获），也不要硬把简单的逻辑拆碎。
+
 Store debugging, testing, and evaluation scripts and files in the repository's
 `tests/` directory.
 
@@ -51,3 +76,36 @@ inspected records and default to `multi`, unless the user has already specified
 these choices. Report the selected field or path and turn mode, then proceed
 with adapter creation, sample validation, and full conversion. Stop if no
 credible prompt candidate exists.
+
+
+## 模块边界与文件粒度
+
+修改组件前阅读 `docs/COMPONENT_ORGANIZATION.md`、`docs/SIMPLIFICATION_PLAN.md`
+和 legospec/data、modeling、training 中对应模块的 `DESIGN.md`。文档中的待实施接口不是现有 API；文件粒度以简化计划为准。
+保持 Context、Backbone、Proposal、Objective 的职责边界，算法名称只作为配方，不新增完整算法维护路径。
+组件可以同文件不同类/函数；不要求每个类、head、状态、注册项各建文件。
+单次使用的处理就近实现；只有真实复用、独立复杂数学、可选依赖或资源生命周期才拆共享模块。
+新增文件或 adapter 时说明它承担的实际职责与消费者；不为对齐目录树建立空 base、转发 wrapper 或工厂层。
+共享训练直接组织 setup/runner/step 与必要设施；相同配置只在入口校验，内部使用已解析结果。
+不以文件数为指标，不通过合并改变概率分布、参数绑定、状态语义或完整 checkpoint 恢复契约。
+
+## 命名要求
+公开模型与配置类使用 LegoSpecModel、LegoSpecConfig，包名 legospec。
+关键变量按所属轴和实际含义命名，如 target_hidden_states、context_hidden_states、backbone_state、proposal_output、loss_numerator。
+跨模块不使用含糊的单字母或 data/features 名称；局部数学 q/k/v 可保留。
+关键公共名称有多个合理方案时先向用户列出候选，普通局部变量自行使用清晰名称。
+
+Default development host (user instruction, 2026-11-22): perform LEGOSpec code
+changes and verification directly on SSH host H800_2. Follow later explicit host
+instructions. Inspect the intended remote project before editing and preserve its
+existing changes; do not overwrite them with an older local checkout.
+
+The main development repository is `/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public` on H800_2 (confirmed 2026-11-22).
+
+Use `/mnt/dai-sys/wanghanzhen/projects/DAC27/envs/legospec-public-py311-cu130-h8002/bin/python` for this main project; this entrypoint selects the pinned SGLang/Torch/CUDA environment documented in docs/SGLANG_RUNTIME.md.
+
+## 开发迭代与训练恢复（用户明确要求，2026-11-22）
+
+开发更新默认只维护当前实现。除非用户明确要求兼容旧版，不添加旧版本分支、适配层、版本标记或兼容性预检查，也不为保留历史行为而保留代码。
+同一次训练恢复按原配置和 rank topology 直接加载实际状态；不比较版本号、配置身份、规划签名或源码指纹。
+保留 optimizer、scheduler、FP32 master、每 rank RNG、训练游标和 pending plan 的完整保存/恢复。无效输入由实际读取或执行操作正常报错。

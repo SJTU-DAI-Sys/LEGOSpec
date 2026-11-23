@@ -1,0 +1,188 @@
+{
+  "status": "passed",
+  "gpu_tested": false,
+  "server_cli": "passed",
+  "reasoning_effort": "medium",
+  "native_template": "passed",
+  "multi_turn_reasoning_replay": "passed",
+  "request_to_sampling_params": "passed",
+  "hard_budget_2048_boundary": "passed",
+  "backend_max_new_tokens": 5120,
+  "backend_thinking_budget": 2048,
+  "think_end_ids": [
+    248069
+  ],
+  "request_payload": {
+    "model": "qwen38-27b-regen",
+    "messages": [
+      {
+        "role": "user",
+        "content": "test"
+      }
+    ],
+    "stream": false,
+    "n": 1,
+    "max_tokens": 5120,
+    "seed": 1793256243,
+    "reasoning_effort": "medium",
+    "chat_template_kwargs": {
+      "enable_thinking": true,
+      "preserve_thinking": true,
+      "reasoning_effort": "medium",
+      "thinking": true
+    },
+    "custom_params": {
+      "thinking_budget": 2048
+    },
+    "stop_token_ids": [
+      248046,
+      248044
+    ],
+    "ignore_eos": false,
+    "return_output_ids_in_sglext": true,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 0.0,
+    "repetition_penalty": 1.0,
+    "tool_choice": "none"
+  },
+  "input_file": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public/tests/qwen38_27b_qz_resume_20261123/imported/training_data/prompts/prompts_system_user_multi.jsonl",
+  "input_bytes": 1451107059,
+  "input_files": [
+    {
+      "path": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public/tests/qwen38_27b_qz_resume_20261123/imported/training_data/prompts/prompts_system_user_multi_2parts/part0.jsonl",
+      "bytes": 725758125
+    },
+    {
+      "path": "/mnt/dai-sys/wanghanzhen/projects/DAC27/LEGOSpec_public/tests/qwen38_27b_qz_resume_20261123/imported/training_data/prompts/prompts_system_user_multi_2parts/part1.jsonl",
+      "bytes": 725348934
+    }
+  ],
+  "samples": [
+    {
+      "part": 0,
+      "id": 0,
+      "user_turns": 1,
+      "first_prompt_tokens": 47
+    },
+    {
+      "part": 0,
+      "id": 2,
+      "user_turns": 1,
+      "first_prompt_tokens": 59
+    },
+    {
+      "part": 0,
+      "id": 4,
+      "user_turns": 1,
+      "first_prompt_tokens": 47
+    },
+    {
+      "part": 0,
+      "id": 6,
+      "user_turns": 1,
+      "first_prompt_tokens": 85
+    },
+    {
+      "part": 0,
+      "id": 8,
+      "user_turns": 1,
+      "first_prompt_tokens": 39
+    },
+    {
+      "part": 1,
+      "id": 1,
+      "user_turns": 1,
+      "first_prompt_tokens": 60
+    },
+    {
+      "part": 1,
+      "id": 3,
+      "user_turns": 1,
+      "first_prompt_tokens": 233
+    },
+    {
+      "part": 1,
+      "id": 5,
+      "user_turns": 4,
+      "first_prompt_tokens": 425
+    },
+    {
+      "part": 1,
+      "id": 7,
+      "user_turns": 1,
+      "first_prompt_tokens": 35
+    },
+    {
+      "part": 1,
+      "id": 9,
+      "user_turns": 1,
+      "first_prompt_tokens": 58
+    }
+  ],
+  "server_flags": [
+    "--model-path",
+    "/mnt/dai-sys/wanghanzhen/models/Qwen/Qwen3.8-27B",
+    "--served-model-name",
+    "qwen38-27b-regen",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "32281",
+    "--tp-size",
+    "2",
+    "--dtype",
+    "bfloat16",
+    "--dist-timeout",
+    "3600",
+    "--reasoning-parser",
+    "qwen3",
+    "--enable-strict-thinking",
+    "--grammar-backend",
+    "xgrammar",
+    "--attention-backend",
+    "triton",
+    "--linear-attn-backend",
+    "triton",
+    "--mamba-ssm-dtype",
+    "float32",
+    "--kv-cache-dtype",
+    "bfloat16",
+    "--context-length",
+    "262144",
+    "--mem-fraction-static",
+    "0.9",
+    "--chunked-prefill-size",
+    "4096",
+    "--max-running-requests",
+    "256",
+    "--max-mamba-cache-size",
+    "256",
+    "--disable-radix-cache",
+    "--disable-overlap-schedule",
+    "--cuda-graph-backend-decode",
+    "disabled",
+    "--cuda-graph-backend-prefill",
+    "disabled"
+  ],
+  "fingerprint": "3777efe739e95686b6e1653cda92b9781f24148e0e4d6290e211332a2562b0ba",
+  "metadata_sha256": {
+    "config.json": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "model.safetensors.index.json": "77042094076611b69791a610065f28b7013b8c621795fa86ddccc8bac7d1b9df",
+    "generation_client.py": "5d50b16cbfaeaf3359b881707c2b5d27c85e41e70d98dc068753e2aea37ec22c",
+    "sglang/srt/models/qwen3_5.py": "9ccff88d991fc492daff984e73b5f88fb4daac62d19a2c19c6c686c9bbe5499c",
+    "sglang/srt/configs/model_config.py": "be3a0168bdd3b4a6b1f7778420b83f95c315535812b44e9422e1b48dd856a11e",
+    "sglang/srt/server_args.py": "1dc6d150bf7c4ef5c2316c2ce21ca28ea557ac26fcdb150d21ac48fff1a784e6",
+    "sglang/srt/entrypoints/openai/protocol.py": "c59fda1238546fb2945d7bbb79466a66344dc054b262aecd85fb2659072aea88",
+    "sglang/srt/entrypoints/openai/serving_chat.py": "a0886cdf125b9c8c98c4618a4a6afee7020095623b7ee6cd874b67b94f9efb36",
+    "sglang/srt/constrained/grammar_manager.py": "2a6e01e73992ad951b9bbd695ebd7e99adb751b45588e40a8a88995550f55d37",
+    "sglang/srt/constrained/reasoner_grammar_backend.py": "79cc54053900c58af280c6e7989052e4f993b81bcebe563c57fe84d975742cd2",
+    "transformers_version": "5.12.1"
+  },
+  "config_sha256": "faf17a7e1a797eea4b35201752be82bc90074166823496c0730ffd9f70aaca3e"
+}

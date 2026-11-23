@@ -41,6 +41,7 @@ arguments:
   build_dataset_num_proc: 16
   dataloader_num_workers: 2
   log_interval: 50
-  save_strategy: final_only
-  save_training_state: false
+  save_strategy: interval
+  save_training_state: true
   report_to: none
+  save_interval: 15000

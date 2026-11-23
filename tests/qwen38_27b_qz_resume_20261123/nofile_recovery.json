@@ -1,0 +1,39 @@
+{
+  "created_at": 1795409198.5230317,
+  "original_soft_limit": 1024,
+  "new_soft_limit": 65536,
+  "hard_limit": 65536,
+  "descriptor_test": 2048,
+  "successes": 555612,
+  "appended_successes": 963,
+  "currently_available_gpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "restarted_at": 1795410429.7282686,
+  "physical_groups": [
+    [
+      0,
+      1
+    ],
+    [
+      4,
+      5
+    ],
+    [
+      2,
+      3
+    ]
+  ],
+  "replicas": 3,
+  "concurrency_per_replica": 256,
+  "runtime_fingerprint": "77818b46b4719c10e0a11893fed957981a72b81154d75639ffe41cd445dad8d9",
+  "preserved_output_bytes": {
+    "part0": 5456913889,
+    "part1": 5390681301
+  }
+}

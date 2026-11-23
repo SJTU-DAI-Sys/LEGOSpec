@@ -1,0 +1,11 @@
+{
+  "development/opd/target/anchor_opd.py": "26a45a96f9a01c29f6df42e34985445e39aa3e16d5ba63a37682f57c5d4cc2d0",
+  "development/opd/target/sglang_anchor_opd.py": "0685a65f235558fabe54c0cd449de6033c11e2225113db666b4195ac37affdd0",
+  "development/opd/sampled.py": "d8d9a8c075e863b6fdee3bcab531d4931d57de016bdffcd0f9ad012b14a75e0c",
+  "development/opd/configs/anchor_comparison_sft_rnn.yaml": "3cf6daac08615c38f60e166d5e372e8a8871dace6e33c885a960f3d900d80ed9",
+  "tests/development/opd/test_anchor_opd.py": "62b408750a7df93b70f52be4ba4c7e3b457121134387f4d60836405c6fb72a1b",
+  "tests/development/opd/test_e2e_tv_causal.py": "d8808201c19885eb1479d87d08c8ab5229cf05cc34d04ea1c858856db2e035f8",
+  "tests/development/opd/test_packed_training.py": "e38735eac19c71337cbc937b47d74fe96126a2b436dc75600259094f68a4469b",
+  "tests/development/opd/test_target_feature_contract.py": "0e8b1938b16430a127fcc22a4c5ed98d7cb98c211853e4af9c2caf87a8bbeef2",
+  "tests/development/opd/test_composable_eagle3.py": "028f9b64abb48ea91c1b90d3030182fdd308ce7442c1b731a5bae2372da7f858"
+}

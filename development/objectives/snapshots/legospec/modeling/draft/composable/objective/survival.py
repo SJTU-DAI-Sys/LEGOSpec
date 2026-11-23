@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+"""Standard TV plus a differentiable prefix-survival surrogate on fixed data.
+
+Only complete supervised blocks contribute. K counts predictions, excluding the
+anchor. This teacher-forced surrogate is not an on-policy accepted-length bound.
+"""
+
+import math
+
+from legospec.modeling.draft.composable.objective.base import Objective
+from legospec.modeling.draft.composable.objective.vocab import distribution
+
+
+class TVSurvivalObjective(Objective):
+    needs_teacher = True
+    requires_complete_blocks = True
+    metric_names = ("tv_survival/tv", "tv_survival/survival")
+
+    def __init__(self, recipe, proposal_type="parallel"):
+        super().__init__(recipe, proposal_type)
+        weight = recipe.get("survival_weight", 1.0)
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            raise ValueError("survival_weight must be finite and nonnegative")
+        self.survival_weight = float(weight)
+        if not math.isfinite(self.survival_weight) or self.survival_weight < 0:
+            raise ValueError("survival_weight must be finite and nonnegative")
+        # This block objective ignores fixed decay. A sibling Selector loss
+        # may use the same outer gamma for its token-normalized objective.
+
+    def native_denominator(self, layout):
+        mask = layout.prediction_mask
+        complete = (mask > 0.5).all(-1)
+        return complete.sum().float() * mask.size(-1)
+
+    def forward(self, prediction, supervision):
+        if supervision.target_logits is None:
+            raise ValueError("tv_survival requires frozen teacher logits")
+        draft = distribution(prediction.draft_logits, supervision).probabilities()
+        target = distribution(
+            supervision.target_logits, supervision, frozen=True
+        ).probabilities()
+        tv = 0.5 * (target - draft).abs().sum(-1)
+        overlap = (1.0 - tv).clamp(0.0, 1.0)
+        survival_loss = 1.0 - overlap.cumprod(dim=-1)
+        complete = (supervision.prediction_mask > 0.5).all(-1)
+        valid = complete[..., None].to(tv)
+        tv_numerator = (tv * valid).sum()
+        survival_numerator = (survival_loss * valid).sum()
+        denominator = complete.sum().to(tv) * tv.size(-1)
+        return self.output(
+            tv_numerator + self.survival_weight * survival_numerator,
+            denominator,
+            **{
+                "tv_survival/tv": tv_numerator,
+                "tv_survival/survival": survival_numerator,
+            },
+        )
+
+
+"""Offline empirical OPD-Survival with separately normalized KL regions.
+
+Accepted prefixes come from detached teacher-forced greedy matches. The
+reachable survival prefix includes the first failure: H=min(r+1,K). This is a
+fixed-data surrogate; it does not claim on-policy target verification.
+"""
+
+import torch
+
+from legospec.training.outputs import RatioTerms, TrainingOutput
+
+
+def distribution_terms(draft_logits, target_logits, log_q=None, log_p=None):
+    """Full-vocabulary statistics; isolated so CUDA can fuse intermediates."""
+    if log_q is None:
+        log_q = torch.log_softmax(draft_logits.float(), -1)
+    if log_p is None:
+        log_p = torch.log_softmax(target_logits.detach().float(), -1)
+    q, p = log_q.exp(), log_p.exp()
+    return (
+        (p * (log_p - log_q)).sum(-1),
+        (q * (log_q - log_p)).sum(-1),
+        (1.0 - 0.5 * (p - q).abs().sum(-1)).clamp(0.0, 1.0),
+    )
+
+
+class OPDSurvivalObjective(Objective):
+    needs_teacher = True
+    requires_complete_blocks = True
+    needs_component_normalization = True
+
+    def __init__(self, recipe, proposal_type="parallel"):
+        super().__init__(recipe, proposal_type)
+        self.component_weights = {
+            "acc": 1.0,
+            "rej": self.recipe["beta_rej"],
+            "survival": self.recipe["survival_weight"],
+        }
+        self.rejection_decay = self.recipe["rejection_decay"]
+
+    @staticmethod
+    def accepted_lengths(prediction, supervision):
+        """Detached matches before the first failure, excluding the anchor."""
+        if prediction.draft_logits is None:
+            raise ValueError("opd_survival requires full-vocabulary draft logits")
+        if prediction.draft_logits.shape[:-1] != supervision.labels.shape:
+            raise ValueError("opd_survival labels and draft logits must align")
+        if supervision.prediction_mask.shape != supervision.labels.shape:
+            raise ValueError("opd_survival prediction mask and labels must align")
+        complete = (supervision.prediction_mask > 0.5).all(-1)
+        correct = prediction.draft_logits.detach().argmax(-1) == supervision.labels
+        return correct.long().cumprod(-1).sum(-1).masked_fill(~complete, 0)
+
+    def component_masks(self, accepted_lengths, prediction_mask):
+        """Masks shared by the metadata prepass and differentiable objective."""
+        complete = (prediction_mask > 0.5).all(-1)
+        if accepted_lengths.shape != complete.shape:
+            raise ValueError("opd_survival accepted lengths must match block axes")
+        if accepted_lengths.dtype not in (
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            raise ValueError("opd_survival accepted lengths must be integer counts")
+        k = prediction_mask.size(-1)
+        r = accepted_lengths.detach()
+        if ((r < 0) | (r > k)).any():
+            raise ValueError("opd_survival accepted lengths must be within [0, K]")
+        position = torch.arange(1, k + 1, device=prediction_mask.device)
+        accepted = complete[..., None] & (position <= r[..., None])
+        rejected = complete[..., None] & (position > r[..., None])
+        reachable = complete[..., None] & (position <= (r + 1).clamp_max(k)[..., None])
+        weights = self.rejection_decay ** (position.float() - 1.0)
+        return complete, accepted, rejected.to(torch.float32) * weights, reachable
+
+    def component_denominators(self, accepted_lengths, prediction_mask):
+        complete, accepted, rejected_weights, _ = self.component_masks(
+            accepted_lengths, prediction_mask
+        )
+        return {
+            "acc": accepted.sum().float(),
+            "rej": rejected_weights.sum(),
+            "survival": complete.sum().float() * prediction_mask.size(-1),
+        }
+
+    def native_denominator(self, layout):
+        # Reference capacity only. Training must combine component_terms with
+        # their own global optimizer-window denominators, never this one alone.
+        return (layout.prediction_mask > 0.5).all(
+            -1
+        ).sum().float() * layout.prediction_mask.size(-1)
+
+    def forward(self, prediction, supervision):
+        if supervision.target_logits is None:
+            raise ValueError("opd_survival requires frozen teacher logits")
+        if prediction.draft_logits is None:
+            raise ValueError("opd_survival requires full-vocabulary draft logits")
+        if prediction.draft_logits.shape != supervision.target_logits.shape:
+            raise ValueError("opd_survival draft and teacher logits must align")
+        if prediction.draft_logits.shape[:-1] != supervision.labels.shape:
+            raise ValueError("opd_survival labels and logits must align")
+        if supervision.prediction_mask.shape != supervision.labels.shape:
+            raise ValueError("opd_survival prediction mask and labels must align")
+        r = getattr(supervision, "opd_accepted_lengths", None)
+        if r is None:
+            r = self.accepted_lengths(prediction, supervision)
+        complete, accepted, rejected_weights, reachable = self.component_masks(
+            r, supervision.prediction_mask
+        )
+        statistics = supervision.opd_distribution_terms
+        if statistics is None:
+            log_q = distribution(
+                prediction.draft_logits, supervision
+            ).log_probabilities()
+            log_p = distribution(
+                supervision.target_logits, supervision, frozen=True
+            ).log_probabilities()
+            statistics = distribution_terms(
+                prediction.draft_logits, supervision.target_logits, log_q, log_p
+            )
+        if len(statistics) != 3 or any(
+            term.shape != supervision.labels.shape for term in statistics
+        ):
+            raise ValueError("OPD distribution terms must align with [N,A,K] labels")
+        forward_kl, reverse_kl, overlap = statistics
+        prefix = overlap.cumprod(-1)
+        capacity = complete.sum().to(prefix) * prefix.size(-1)
+        components = {
+            "acc": RatioTerms((forward_kl * accepted).sum(), accepted.sum().to(prefix)),
+            "rej": RatioTerms(
+                (reverse_kl * rejected_weights).sum(), rejected_weights.sum()
+            ),
+            "survival": RatioTerms(capacity - (prefix * reachable).sum(), capacity),
+        }
+        loss = sum(
+            self.component_weights[name]
+            * terms.numerator
+            / terms.denominator.clamp_min(1e-12)
+            for name, terms in components.items()
+        )
+        reference = loss.new_tensor(supervision.labels.size(0))
+        metrics = {
+            "opd_survival/" + name: terms.detached()
+            for name, terms in components.items()
+        }
+        accepted_count = accepted.sum().to(prefix)
+        raw_counts = {
+            "opd_survival/accepted_positions": accepted_count.detach(),
+            "opd_survival/rejected_positions": (capacity - accepted_count).detach(),
+            "opd_survival/reachable_positions": reachable.sum().to(prefix).detach(),
+        }
+        return TrainingOutput(
+            loss,
+            RatioTerms(loss * reference, reference),
+            metrics,
+            sum_metrics=raw_counts,
+            component_terms=components,
+        )

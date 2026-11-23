@@ -401,7 +401,10 @@ def _normalize_content(
 
 
 def normalize_extracted(
-    extracted: Any, fallback_source: str, turn_mode: str, *,
+    extracted: Any,
+    fallback_source: str,
+    turn_mode: str,
+    *,
     preserve_content_whitespace: bool = False,
     keep_empty_user_turns: bool = False,
 ) -> dict[str, Any]:
@@ -421,7 +424,8 @@ def normalize_extracted(
             {
                 "role": "user",
                 "content": _normalize_content(
-                    extracted["prompt"], "prompt",
+                    extracted["prompt"],
+                    "prompt",
                     preserve_whitespace=preserve_content_whitespace,
                 ),
             }
@@ -447,10 +451,18 @@ def normalize_extracted(
             raw_content = message.get("content")
             if isinstance(raw_content, str) and not raw_content.strip():
                 if keep_empty_user_turns and role == "user":
-                    messages.append({"role": role, "content": raw_content if preserve_content_whitespace else raw_content.strip()})
+                    messages.append(
+                        {
+                            "role": role,
+                            "content": raw_content
+                            if preserve_content_whitespace
+                            else raw_content.strip(),
+                        }
+                    )
                 continue
             content = _normalize_content(
-                raw_content, f"message {index}",
+                raw_content,
+                f"message {index}",
                 preserve_whitespace=preserve_content_whitespace,
             )
             messages.append({"role": role, "content": content})
@@ -470,7 +482,9 @@ def normalize_extracted(
             message for message in messages[:first_user] if message["role"] == "system"
         ]
         messages = leading_system + [messages[first_user]]
-    elif not any(message["role"] == "user" and message["content"].strip() for message in messages):
+    elif not any(
+        message["role"] == "user" and message["content"].strip() for message in messages
+    ):
         raise ConversionError("record has no non-empty user turn")
 
     source = extracted.get("source")
@@ -600,11 +614,15 @@ def convert_records(args: argparse.Namespace) -> dict[str, Any]:
                 try:
                     extracted = extract(row)
                     normalized = normalize_extracted(
-                        extracted, fallback_source, args.turn_mode,
+                        extracted,
+                        fallback_source,
+                        args.turn_mode,
                         preserve_content_whitespace=getattr(
                             args, "preserve_content_whitespace", False
                         ),
-                        keep_empty_user_turns=getattr(args, "keep_empty_user_turns", False),
+                        keep_empty_user_turns=getattr(
+                            args, "keep_empty_user_turns", False
+                        ),
                     )
                 except Exception as exc:
                     if not args.skip_invalid:
@@ -697,11 +715,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     convert_parser.add_argument("--turn-mode", choices=TURN_MODES, default="multi")
     convert_parser.add_argument(
-        "--preserve-content-whitespace", action="store_true",
+        "--preserve-content-whitespace",
+        action="store_true",
         help="Keep original text whitespace (for exact prompt matching)",
     )
     convert_parser.add_argument(
-        "--keep-empty-user-turns", action="store_true",
+        "--keep-empty-user-turns",
+        action="store_true",
         help="Keep empty user turns in multi mode; a non-empty user turn is still required",
     )
     convert_parser.add_argument(

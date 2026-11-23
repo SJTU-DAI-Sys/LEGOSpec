@@ -1,0 +1,2084 @@
+--- legospec/modeling/target/sglang.py.before
++++ legospec/modeling/target/sglang.py
+@@ -111,8 +111,3 @@
+             )
+         return self._components
+ 
+-    def build_anchor_scorer(self):
+-        from legospec.modeling.target.sglang_anchor_opd import SGLangAnchorScorer
+-
+-        self.adapter.remove_capture()
+-        return SGLangAnchorScorer(self)
+--- legospec/modeling/target/DESIGN.md.before
++++ legospec/modeling/target/DESIGN.md
+@@ -1,19 +1,19 @@
+ # Target 模型边界
+ 
+ `training_target_model.py` 定义输出、backend 接口和构造入口；不依赖 training。
+-`hf.py` / `sglang.py` 负责 forward、设备、TP、批次还原、共享组件和 anchor scorer 生命周期。
+-`adapters/base.py` 提供默认模型结构与 capture 语义；`gemma.py` 保留原生 embedding 缩放、softcap、capture 选择和 final norm 重建；`qwen35.py` 管固定环境的 Qwen3.5/3.6 communicator capture patch。
++`hf.py` / `sglang.py` 负责 forward、设备、TP、批次还原、共享组件。
++`adapters/base.py` 提供默认模型结构与 capture 语义；`gemma.py` 保留原生 embedding 缩放、softcap、capture 选择和 final norm 重建；`qwen35.py` 管固定环境的 Qwen3.5/3.6 native capture 接口。
+ 只有模型确有差异才增加 adapter；不复制完整 backend。默认 adapter 被普通 HF/SGLang 和离线组件加载复用，Gemma/Qwen adapter 被统一构造入口选择。
+ 
+ `components.py` 负责共享 embedding/head、词表 TP 通信与独立权重加载。模型 adapter 定位组件、提供数值语义；是否分片与如何通信由组件实现负责。
+ 通用 native packed capture 在 `sglang_backend/capture.py`，SGLang backend 创建引擎；TP 初始化在 `sglang_backend/parallel.py`。Gemma adapter 不创建 engine、不初始化分布式。在线训练和离线采集都调用 `get_training_target_model()`，没有模型专属构造入口。
+-anchor scorer 的独立数学保留在原文件，训练端只调用 `build_anchor_scorer()`。
++OPD scorer 与集成快照已移到 development/opd/；当前 backend 不提供 scorer 工厂。
+ 
+ 所有训练输出 `hidden_states` 是 0-based decoder 层编号到 tensor 的字典。最后一层 context 是 final norm 前 residual；`final_hidden_state` 单独保存 final norm 后 teacher 特征，不能互相替代。
+ HF/SGLang backend 负责从原生输出转换；缓存 reader 返回相同含义。训练端不猜 tuple offset、不兜底填补缺失 teacher。
+ packed capture 保留 token offsets 与 bulk aux/last 传输，训练按 batch-first 输出，不以 padding 扩大离线采集的显存/访存。
+ 
+-capture 层在构造时传入。SGLang adapter hooks 仅安装在当前模型实例，重设时移除；Qwen communicator patch 显式保存并恢复原方法，创建 anchor scorer 前释放普通 capture hooks。
++capture 层在构造时传入。SGLang adapter hooks 仅安装在当前模型实例，重设时移除；Qwen 的最后一层 residual 在 final norm 前捕获。
+ 训练需求与资源预算在 `training/target/setup.py`，选择/拼接在 `features.py`，producer/packet 调度在 `streaming.py`。监督 logits 的按需投影仍归 objective/supervision。
+ 
+ 不提供旧路径转发、版本号或旧格式兼容。回归记录：`tests/target_boundaries_20261122/`。
+--- legospec/modeling/target/training_target_model.py.before
++++ legospec/modeling/target/training_target_model.py
+@@ -3,6 +3,7 @@
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from typing import List, Optional
++
+ import torch
+ 
+ 
+@@ -57,10 +58,6 @@
+     def build_shared_components(self, mask_token_id):
+         """Frozen views of resident embedding/head, retaining input gradients."""
+ 
+-    @abstractmethod
+-    def build_anchor_scorer(self):
+-        """Create the backend's sampled-anchor service."""
+-
+ 
+ def get_training_target_model(
+     pretrained_model_name_or_path: str,
+--- legospec/modeling/target/sglang_anchor_opd.py.before
++++ legospec/modeling/target/sglang_anchor_opd.py
+@@ -1,268 +0,0 @@
+-"""SGLang sampled-anchor teacher: one document prefill, shared paged prefix KV.
+-
+-Each active anchor is an independent causal EXTEND request into the same source
+-KV slots. Only its sampled suffix gets new slots; there is no prefix KV copying
+-or anchor chunking. This service owns the runner's pools until prefix.release().
+-"""
+-
+-from array import array
+-from dataclasses import dataclass, field
+-
+-import torch
+-
+-
+-@dataclass
+-class SGLangAnchorPrefix:
+-    owner: object
+-    valid: torch.Tensor
+-    anchors: torch.Tensor
+-    keep: torch.Tensor
+-    anchor_hidden: torch.Tensor
+-    full_hidden: torch.Tensor
+-    token_indices: list
+-    source_ids: list
+-    context_hidden: dict = field(default_factory=dict)
+-    released: bool = False
+-
+-    def release(self):
+-        if self.released:
+-            return
+-        self.owner._clear_pools()
+-        self.owner._active_prefix = None
+-        self.context_hidden.clear()
+-        self.token_indices.clear()
+-        self.source_ids.clear()
+-        self.full_hidden = None
+-        self.released = True
+-
+-
+-class SGLangAnchorScorer:
+-    uses_live_anchor_hidden = True
+-    backend = "sglang"
+-
+-    def __init__(self, target):
+-        self.target = target
+-        self.runner = target.model_runner
+-        self.model = self.runner.model.requires_grad_(False).eval()
+-        if self.model.config.model_type != "qwen3":
+-            raise ValueError("SGLang sampled-anchor OPD currently supports dense Qwen3")
+-        if int(self.runner.server_args.tp_size) != 1:
+-            raise ValueError("SGLang sampled-anchor OPD requires tp_size=1")
+-        from sglang.srt.runtime_context import get_schedule
+-
+-        if get_schedule().page_size != 1:
+-            raise ValueError(
+-                "Arbitrary anchor prefix sharing requires SGLang page_size=1"
+-            )
+-        self.prefill_calls = self.branch_calls = 0
+-        self._active_prefix = None
+-        self._captured = {}
+-
+-    def _clear_pools(self):
+-        self.runner.req_to_token_pool.clear()
+-        self.runner.token_to_kv_pool_allocator.clear()
+-        self._captured.clear()
+-
+-    def _request(self, rid, ids, prefix_indices=None):
+-        from sglang.srt.managers.schedule_batch import Req
+-        from sglang.srt.sampling.sampling_params import SamplingParams
+-
+-        req = Req(
+-            rid=rid,
+-            origin_input_text="",
+-            origin_input_ids=array("q", ids),
+-            vocab_size=self.runner.model_config.vocab_size,
+-            sampling_params=SamplingParams(temperature=0.0, max_new_tokens=1),
+-        )
+-        req.init_next_round_input()
+-        if prefix_indices is not None:
+-            req.prefix_indices = prefix_indices
+-        req.set_extend_range(len(req.prefix_indices), len(ids))
+-        return req
+-
+-    @torch.no_grad()
+-    def _forward(self, reqs, capture_layer_ids=()):
+-        from sglang.srt.managers.overlap_utils import resolve_forward_inputs
+-        from sglang.srt.managers.schedule_batch import ScheduleBatch
+-        from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+-        from sglang.srt.mem_cache.radix_cache import RadixCache
+-        from sglang.srt.model_executor.forward_batch_info import (
+-            CaptureHiddenMode,
+-            ForwardBatch,
+-        )
+-        from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+-
+-        if not reqs:
+-            raise ValueError("Internal SGLang extend cannot contain zero requests")
+-        required = sum(req.extend_range.length for req in reqs)
+-        pool, allocator = (
+-            self.runner.req_to_token_pool,
+-            self.runner.token_to_kv_pool_allocator,
+-        )
+-        if len(reqs) > pool.available_size() or required > allocator.available_size():
+-            raise RuntimeError(
+-                "SGLang OPD pool too small for all anchors together: "
+-                f"need requests={len(reqs)}, suffix_tokens={required}; "
+-                f"available requests={pool.available_size()}, tokens={allocator.available_size()}"
+-            )
+-        if max(map(lambda req: len(req.get_fill_ids()), reqs)) > pool.max_context_len:
+-            raise ValueError(
+-                "Anchor branch exceeds the configured SGLang context length"
+-            )
+-        layer_ids = sorted(capture_layer_ids)
+-        self.target.adapter.remove_capture()
+-        if layer_ids:
+-            self.target.adapter.install_capture(self.model, layer_ids)
+-        else:
+-            self.model.capture_aux_hidden_states = False
+-            self.model.model.layers_to_capture = []
+-        tree = RadixCache(
+-            CacheInitParams(
+-                disable=True,
+-                req_to_token_pool=pool,
+-                token_to_kv_pool_allocator=allocator,
+-                page_size=1,
+-            )
+-        )
+-        batch = ScheduleBatch.init_new(
+-            reqs=reqs,
+-            req_to_token_pool=pool,
+-            token_to_kv_pool_allocator=allocator,
+-            tree_cache=tree,
+-            model_config=self.runner.model_config,
+-            enable_overlap=False,
+-            spec_algorithm=SpeculativeAlgorithm.NONE,
+-        )
+-        batch.prepare_for_extend()
+-        resolve_forward_inputs(batch, self.target.engine.future_map)
+-        forward = ForwardBatch.init_new(
+-            batch,
+-            self.runner,
+-            capture_hidden_mode=CaptureHiddenMode.FULL,
+-            return_hidden_states_before_norm=False,
+-        )
+-        teacher = {}
+-
+-        def capture_teacher(module, args):
+-            teacher["hidden"] = args[1]
+-
+-        handle = self.model.logits_processor.register_forward_pre_hook(capture_teacher)
+-        try:
+-            output = self.runner.forward(forward).logits_output
+-            hidden = teacher["hidden"]
+-            if hidden.shape[0] != required:
+-                raise RuntimeError("SGLang must return every EXTEND token hidden state")
+-            captured = {}
+-            if layer_ids:
+-                aux = output.hidden_states.reshape(
+-                    required, len(layer_ids), hidden.shape[-1]
+-                )
+-                captured = {layer: aux[:, i] for i, layer in enumerate(layer_ids)}
+-            return hidden, captured, batch
+-        finally:
+-            handle.remove()
+-            self.target.adapter.remove_capture()
+-            self.model.capture_aux_hidden_states = False
+-            self.model.model.layers_to_capture = []
+-
+-    @torch.no_grad()
+-    def prefill_anchors(self, input_ids, valid, anchors, keep, *, capture_layer_ids=()):
+-        if self._active_prefix is not None:
+-            raise RuntimeError(
+-                "Release the previous SGLang anchor prefix before prefilling again"
+-            )
+-        if input_ids.ndim != 2 or input_ids.shape != valid.shape:
+-            raise ValueError("Source IDs and validity must have matching [N,S] axes")
+-        if anchors.shape != keep.shape or anchors.shape[0] != input_ids.shape[0]:
+-            raise ValueError("Anchor axes must match source batch")
+-        if input_ids.shape[1] == 0 or input_ids.shape[0] == 0:
+-            raise ValueError("SGLang source batch must be nonempty")
+-        valid = valid.bool()
+-        lengths = valid.long().sum(-1)
+-        expected = (
+-            torch.arange(valid.shape[1], device=valid.device)[None] < lengths[:, None]
+-        )
+-        if not torch.equal(expected, valid):
+-            raise ValueError(
+-                "SGLang anchor OPD requires right-padded source attention masks"
+-            )
+-        if ((anchors[keep] < 0) | (anchors[keep] >= input_ids.shape[1])).any():
+-            raise ValueError("Active anchor outside source")
+-        safe = anchors.masked_fill(~keep, 0)
+-        if not valid.gather(1, safe).masked_fill(~keep, True).all():
+-            raise ValueError("Active anchor must refer to a valid source token")
+-        ids_cpu = input_ids.tolist()
+-        lens = [max(1, n) for n in lengths.tolist()]
+-        source = [row[:length] for row, length in zip(ids_cpu, lens)]
+-        reqs = [self._request(f"prefix-{i}", ids) for i, ids in enumerate(source)]
+-        try:
+-            hidden, captured, batch = self._forward(reqs, capture_layer_ids)
+-            n, s = input_ids.shape
+-            full = hidden.new_zeros(n, s, hidden.shape[-1])
+-            contexts = {
+-                i: value.new_zeros(n, s, value.shape[-1])
+-                for i, value in captured.items()
+-            }
+-            offset = 0
+-            for index, length in enumerate(lens):
+-                full[index, :length] = hidden[offset : offset + length]
+-                for layer_id in contexts:
+-                    contexts[layer_id][index, :length] = captured[layer_id][
+-                        offset : offset + length
+-                    ]
+-                offset += length
+-            # SGLang's write_req_to_token_pool Triton kernel reads prefix
+-            # pointers as int64, although the request table itself is int32.
+-            indices = [
+-                self.runner.req_to_token_pool.req_to_token[
+-                    req.kv.req_pool_idx, :length
+-                ].to(torch.int64)
+-                for req, length in zip(reqs, lens)
+-            ]
+-            first = full.gather(1, safe[..., None].expand(-1, -1, full.shape[-1]))
+-            prefix = SGLangAnchorPrefix(
+-                self, valid, safe, keep, first, full, indices, source, contexts
+-            )
+-            self._active_prefix = prefix
+-            self.prefill_calls += 1
+-            return prefix
+-        except BaseException:
+-            self._clear_pools()
+-            raise
+-
+-    @torch.no_grad()
+-    def score_sampled_blocks(self, prefix, draft_ids, *, cached_anchor_hidden=None):
+-        if prefix is not self._active_prefix or prefix.released:
+-            raise ValueError("Expired or foreign SGLang prefix")
+-        n, a, k = draft_ids.shape
+-        if prefix.anchors.shape != (n, a) or k < 1:
+-            raise ValueError("Sampled branch shape must align with the prefix anchors")
+-        if cached_anchor_hidden is not None:
+-            raise ValueError("SGLang verification uses its live anchor hidden state")
+-        first = prefix.anchor_hidden
+-        result = first.new_zeros(n, a, k, first.shape[-1])
+-        result[..., 0, :] = first
+-        active = prefix.keep.nonzero().tolist()
+-        if k > 1 and active:
+-            sampled = draft_ids[..., :-1].tolist()
+-            anchors = prefix.anchors.tolist()
+-            reqs = []
+-            for row, col in active:
+-                length = anchors[row][col] + 1
+-                reqs.append(
+-                    self._request(
+-                        f"branch-{row}-{col}",
+-                        prefix.source_ids[row][:length] + sampled[row][col],
+-                        prefix.token_indices[row][:length],
+-                    )
+-                )
+-            try:
+-                hidden, _, batch = self._forward(reqs)
+-                suffix = hidden.reshape(len(active), k - 1, -1)
+-                rows, cols = prefix.keep.nonzero(as_tuple=True)
+-                result[rows, cols, 1:] = suffix
+-            except BaseException:
+-                prefix.release()
+-                raise
+-        self.branch_calls += 1
+-        return result
+--- legospec/modeling/target/hf.py.before
++++ legospec/modeling/target/hf.py
+@@ -1,12 +1,14 @@
+ from typing import Optional
++
+ import torch
+ import torch.nn as nn
++from transformers import AutoModelForCausalLM
++
++from legospec.modeling.target.adapters.base import TargetModelAdapter
+ from legospec.modeling.target.training_target_model import (
++    TargetTrainingOutput,
+     TrainingTargetModel,
+-    TargetTrainingOutput,
+ )
+-from legospec.modeling.target.adapters.base import TargetModelAdapter
+-from transformers import AutoModelForCausalLM
+ 
+ 
+ class HFTrainingTargetModel(TrainingTargetModel):
+@@ -130,7 +132,3 @@
+             )
+         return self._components
+ 
+-    def build_anchor_scorer(self):
+-        from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+-
+-        return Qwen3AnchorScorer(self.model)
+--- legospec/modeling/target/anchor_opd.py.before
++++ legospec/modeling/target/anchor_opd.py
+@@ -1,195 +0,0 @@
+-"""Frozen Qwen3 scoring with one prefix KV per document, shared by all anchors.
+-
+-No branch is appended to the prefix cache. Prefixes use the target model's
+-standard causal forward. Branches use the project's guarded FlexAttention path
+-on CUDA and a dense SDPA numerical oracle on CPU.
+-"""
+-
+-from dataclasses import dataclass, field
+-
+-import torch
+-from torch.nn import functional as F
+-from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
+-
+-
+-@dataclass
+-class AnchorPrefix:
+-    key_values: list
+-    valid: torch.Tensor
+-    anchors: torch.Tensor
+-    keep: torch.Tensor
+-    anchor_hidden: torch.Tensor
+-    context_hidden: dict = field(default_factory=dict)
+-
+-    def release(self):
+-        self.key_values.clear()
+-        self.context_hidden.clear()
+-
+-
+-def _attend(q, k, v, mask_mod, scale):
+-    if q.is_cuda:
+-        from legospec.modeling.draft.composable.backbone.attention.backends.flex import (
+-            compile_friendly_flex_attention,
+-            create_flex_block_mask,
+-            flex_kernel_options,
+-        )
+-
+-        mask = create_flex_block_mask(
+-            mask_mod,
+-            B=q.size(0),
+-            H=None,
+-            Q_LEN=q.size(-2),
+-            KV_LEN=k.size(-2),
+-            device=q.device,
+-            backend="TRITON",
+-        )
+-        return compile_friendly_flex_attention(
+-            q,
+-            k,
+-            v,
+-            block_mask=mask,
+-            enable_gqa=q.size(1) != k.size(1),
+-            scale=scale,
+-            kernel_options=flex_kernel_options("TRITON"),
+-        )
+-    from torch.nn.attention.flex_attention import create_mask
+-
+-    mask = create_mask(mask_mod, q.size(0), 1, q.size(-2), k.size(-2), device=q.device)
+-    return F.scaled_dot_product_attention(
+-        q, k, v, attn_mask=mask, enable_gqa=q.size(1) != k.size(1), scale=scale
+-    )
+-
+-
+-class Qwen3AnchorScorer:
+-    """Plain service object: target parameters never become FSDP children."""
+-
+-    def __init__(self, causal_lm):
+-        config = causal_lm.config
+-        if config.model_type != "qwen3" or any(
+-            kind != "full_attention"
+-            for kind in (getattr(config, "layer_types", None) or [])
+-        ):
+-            raise ValueError(
+-                "Anchor OPD supports dense, full-attention Qwen3 targets only"
+-            )
+-        if (
+-            (getattr(config, "rope_parameters", None) or {}).get("rope_type", "default")
+-            != "default"
+-        ):
+-            raise ValueError("Anchor OPD currently requires standard Qwen3 RoPE")
+-        self.model = causal_lm.requires_grad_(False).eval()
+-        self.prefill_calls = 0
+-        self.branch_calls = 0
+-
+-    def _qkv(self, attention, hidden, positions):
+-        shape = (*hidden.shape[:-1], -1, attention.head_dim)
+-        q = attention.q_norm(attention.q_proj(hidden).view(shape)).transpose(1, 2)
+-        k = attention.k_norm(attention.k_proj(hidden).view(shape)).transpose(1, 2)
+-        v = attention.v_proj(hidden).view(shape).transpose(1, 2)
+-        cos, sin = self.model.model.rotary_emb(hidden, positions)
+-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+-        return q, k, v
+-
+-    @staticmethod
+-    def _finish(layer, residual, attended):
+-        attended = attended.transpose(1, 2).reshape(*residual.shape[:-1], -1)
+-        hidden = residual + layer.self_attn.o_proj(attended)
+-        return hidden + layer.mlp(layer.post_attention_layernorm(hidden))
+-
+-    @torch.no_grad()
+-    def prefill_anchors(self, input_ids, valid, anchors, keep, *, capture_layer_ids=()):
+-        if input_ids.ndim != 2 or valid.shape != input_ids.shape:
+-            raise ValueError(
+-                "Prefix token IDs and validity must have matching [N,S] axes"
+-            )
+-        if anchors.shape != keep.shape or anchors.size(0) != input_ids.size(0):
+-            raise ValueError("Anchor axes must match prefix batch")
+-        if (anchors[keep] < 0).any() or (anchors[keep] >= input_ids.size(1)).any():
+-            raise ValueError("Anchor outside source document")
+-        if not valid.bool().gather(1, anchors).masked_fill(~keep, True).all():
+-            raise ValueError("Active anchors must point to valid tokens")
+-        length = int(anchors.masked_fill(~keep, 0).max().item()) + 1
+-        valid = valid[:, :length].bool()
+-        safe_anchors = anchors.masked_fill(~keep, 0)
+-        captured, handles = {}, []
+-        for index in capture_layer_ids:
+-
+-            def capture(module, args, output, layer_id=index):
+-                captured[layer_id] = output[0] if isinstance(output, tuple) else output
+-
+-            handles.append(
+-                self.model.model.layers[index].register_forward_hook(capture)
+-            )
+-        try:
+-            output = self.model.model(
+-                input_ids=input_ids[:, :length],
+-                attention_mask=valid,
+-                use_cache=True,
+-                output_hidden_states=False,
+-            )
+-        finally:
+-            for handle in handles:
+-                handle.remove()
+-        cache = output.past_key_values
+-        if hasattr(cache, "to_legacy_cache"):
+-            caches = list(cache.to_legacy_cache())
+-        else:
+-            caches = [(layer.keys, layer.values) for layer in cache.layers]
+-        hidden = output.last_hidden_state
+-        anchor_hidden = hidden.gather(
+-            1, safe_anchors[..., None].expand(-1, -1, hidden.size(-1))
+-        )
+-        self.prefill_calls += 1
+-        return AnchorPrefix(caches, valid, safe_anchors, keep, anchor_hidden, captured)
+-
+-    @torch.no_grad()
+-    def score_sampled_blocks(self, prefix, draft_ids, *, cached_anchor_hidden=None):
+-        n, a, k = draft_ids.shape
+-        if prefix.anchors.shape != (n, a) or len(prefix.key_values) != len(
+-            self.model.model.layers
+-        ):
+-            raise ValueError("Expired or incompatible anchor prefix")
+-        first = (
+-            prefix.anchor_hidden
+-            if cached_anchor_hidden is None
+-            else cached_anchor_hidden
+-        )
+-        if first.shape != (n, a, self.model.config.hidden_size):
+-            raise ValueError("Cached anchor hidden must have [N,A,D] axes")
+-        if k == 1:
+-            self.branch_calls += 1
+-            return first.unsqueeze(-2)
+-        slots = k - 1
+-        hidden = self.model.get_input_embeddings()(draft_ids[..., :-1].reshape(n, -1))
+-        positions = (
+-            prefix.anchors[..., None] + 1 + torch.arange(slots, device=draft_ids.device)
+-        ).reshape(n, -1)
+-        prefix_length = prefix.valid.size(1)
+-
+-        def branch_mask(b, h, q, key):
+-            branch = (q // slots).clamp_max(a - 1)
+-            active = prefix.keep[b, branch]
+-            source = (key < prefix_length) & prefix.valid[
+-                b, key.clamp(0, prefix_length - 1)
+-            ]
+-            source = source & (key <= prefix.anchors[b, branch])
+-            own = (key >= prefix_length) & ((key - prefix_length) // slots == branch)
+-            own = own & ((key - prefix_length) % slots <= q % slots)
+-            return (active & (source | own)) | (~active & (key == 0))
+-
+-        for layer, (prefix_k, prefix_v) in zip(
+-            self.model.model.layers, prefix.key_values
+-        ):
+-            q, k_branch, v_branch = self._qkv(
+-                layer.self_attn, layer.input_layernorm(hidden), positions
+-            )
+-            keys = torch.cat((prefix_k, k_branch), dim=-2)
+-            values = torch.cat((prefix_v, v_branch), dim=-2)
+-            hidden = self._finish(
+-                layer,
+-                hidden,
+-                _attend(q, keys, values, branch_mask, layer.self_attn.scaling),
+-            )
+-        tail = self.model.model.norm(hidden).reshape(n, a, slots, -1)
+-        self.branch_calls += 1
+-        return torch.cat((first.unsqueeze(-2), tail), dim=-2)
+--- legospec/modeling/draft/composable/loss_config.py.before
++++ legospec/modeling/draft/composable/loss_config.py
+@@ -9,7 +9,6 @@
+ )
+ DPAL_OBJECTIVES = frozenset(("dpal_renyi",))
+ BLOCK_OBJECTIVES = DPAL_OBJECTIVES | {"dpace", "e2e_tv"}
+-SAMPLED_ANCHOR_OBJECTIVES = frozenset(("e2e_tv",))
+ OBJECTIVES = TOKEN_OBJECTIVES | BLOCK_OBJECTIVES | {"weighted_sum"}
+ SELECTOR_TYPES = frozenset(("selector", "residual_selector", "topk_selector"))
+ 
+--- legospec/training/target/setup.py.before
++++ legospec/training/target/setup.py
+@@ -36,19 +36,6 @@
+             backend_kwargs["max_total_tokens"] = int(args.batch_size) * int(
+                 args.max_length
+             )
+-        if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-            backend_kwargs["page_size"] = 1
+-            requests = int(args.batch_size) * (int(args.num_anchors) + 1)
+-            tokens = int(args.batch_size) * (
+-                int(args.max_length)
+-                + int(args.num_anchors) * max(0, int(args.block_size) - 2)
+-            )
+-            backend_kwargs["max_running_requests"] = max(
+-                requests, int(backend_kwargs["max_running_requests"])
+-            )
+-            backend_kwargs["max_total_tokens"] = max(
+-                tokens, int(backend_kwargs["max_total_tokens"])
+-            )
+     target = get_training_target_model(
+         pretrained_model_name_or_path=args.target_model_path,
+         backend=args.target_model_backend,
+@@ -63,10 +50,7 @@
+ 
+ def build_target_and_components(args, draft_models):
+     """Build one target and bind its tokenizer/embedding/head consistently."""
+-    offline = (
+-        bool(args.train_hidden_states_path)
+-        and getattr(args, "opd_data_mode", "teacher_forced") != "sampled_anchor"
+-    )
++    offline = bool(args.train_hidden_states_path)
+     target = None if offline else build_target_model(args, draft_models)
+     (tokenizer, components, mask_token_id) = resolve_tokenizer_and_components(
+         args, draft_models, target=target, standalone_components=offline
+--- legospec/training/DESIGN.md.before
++++ legospec/training/DESIGN.md
+@@ -5,7 +5,7 @@
+ - `runtime/`：setup 组装 session 与 draft/FSDP；runner 管迭代、backward/step 时机和释放；state 管阶段与游标；checkpoint 管导出与完整保存/恢复。
+ - `data/`：loader 管 JSON/hidden-cache loader 与 collator；batch 管 anchor/标签/mask/打包；layout 管索引契约；planning 管样本工作量分配及 CPU token 窗口；prefetch 管有序 CPU 预取。
+ - `target/`：setup 管训练需要的 capture 层、容量预算、在线/缓存选择、tokenizer/mask 和组件装配；features 只管指定层的选择/拼接及设备搬运；streaming 管分离部署的生产循环及训练包。模型语义、backend 差异及共享组件实现归 modeling/target，传输实现在 distributed。
+-- `execution/`：step 管 TrainingStep 与调用参数组织；sampled 管当前策略采样、验证和回放；supervision 管词表分块的监督行；windows 管完整 optimizer 窗口分母与 batch 生命周期。
++- `execution/`：step 管 TrainingStep 与调用参数组织；supervision 管词表分块的监督行；windows 管完整 optimizer 窗口分母与 batch 生命周期。
+ - `optim/`：optimizer 管 FP32 master、AdamW/Muon 组合、梯度裁剪/归一化；scheduler 管学习率；muon 管独立数学；fsdp_layout 隔离 FSDP 私有布局接口。
+ - `logger/`：metrics 管 accuracy、overlap、接受长度；logging 管聚合、日志与 tracker。
+ 
+@@ -14,7 +14,7 @@
+ 低层功能目录不得反向导入 runtime/setup.py 或 runtime/runner.py。checkpoint 直接加载实际状态；不反调 setup。
+ 
+ 迁移直接更新调用方，不保留旧路径转发文件。内部目录使用命名空间包，不创建空 __init__.py。
+-Objective 数学仍归 modeling/draft/composable/objective。已停用的 component-normalized OPD 分支与窗口准备保存在 development/objectives/training_snapshots_20261122，不进入活动训练路径；E2E-TV 共享采样保留。
++Objective 数学仍归 modeling/draft/composable/objective。已停用的 component-normalized OPD 分支与窗口准备保存在 development/objectives/training_snapshots_20261122，不进入活动训练路径。当前 sampled-anchor OPD 的 scorer、采样/回放及其剩余集成已移到 development/opd；普通 E2E-TV 损失保留。
+ 
+ 模型参数路径与损失归一化不因目录组织改变；恢复只服务当前实现。完整恢复保留 optimizer、scheduler、FP32 master、每 rank RNG、训练游标和规划窗口。
+ 回归记录位于 tests/training_layout_20261122/。
+--- legospec/training/runtime/checkpoint.py.before
++++ legospec/training/runtime/checkpoint.py
+@@ -275,17 +275,6 @@
+             dpal_credit="detached_overlap_prefix_suffix",
+             dpal_interpretation="offline_teacher_forced_surrogate",
+         )
+-    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        metadata.update(
+-            opd_data_mode="sampled_anchor",
+-            opd_interpretation="current_policy_sampled_blocks",
+-            opd_accepted_prefix="probabilistic_rejection_sampling",
+-            opd_temperature=1.0,
+-            opd_context_source="offline_hidden"
+-            if session.args.train_hidden_states_path
+-            else "online",
+-            opd_target_chunk_anchors=0,
+-        )
+     return metadata
+ 
+ 
+--- legospec/training/runtime/setup.py.before
++++ legospec/training/runtime/setup.py
+@@ -21,10 +21,8 @@
+ from legospec.modeling.config_utils import load_text_model_config
+ from legospec.modeling.draft.composable import LegoSpecConfig, LegoSpecModel
+ from legospec.modeling.draft.composable.loss_config import (
+-    SAMPLED_ANCHOR_OBJECTIVES,
+     normalize_training_recipe,
+ )
+-from legospec.modeling.draft.composable.objective.composition import LossBranches
+ from legospec.modeling.draft.composable.schema import fields
+ from legospec.training.data.loader import (
+     _build_target_loader,
+@@ -316,10 +314,6 @@
+     else:
+         draft = build_model(args)
+     draft.requires_grad_(True)
+-    if draft.uses_hidden_feedback and args.opd_data_mode != "teacher_forced":
+-        raise ValueError(
+-            "EAGLE3 requires teacher_forced TTT; sampled_anchor OPD is unsupported"
+-        )
+     if (
+         not draft.uses_hidden_feedback
+         and getattr(args, "supervision_mode", "sampled") != "sampled"
+@@ -330,16 +324,6 @@
+     draft.config.composable_config = normalize_training_recipe(
+         draft.config.composable_config
+     )
+-    loss_branches = LossBranches(draft.config.composable_config)
+-    if getattr(args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        recipe = draft.config.composable_config
+-        if (
+-            recipe["proposal"]["type"] not in ("parallel", "rnn")
+-            or recipe["objective"]["type"] not in SAMPLED_ANCHOR_OBJECTIVES
+-        ):
+-            raise ValueError("sampled_anchor requires Parallel/RNN with e2e_tv")
+-        if float(draft.config.attention_dropout) != 0.0:
+-            raise ValueError("sampled_anchor requires zero attention dropout")
+     args.require_target_last_hidden = True
+     indexer = draft.config.indexer_config
+     if indexer is not None and indexer["stage"] == "warmup":
+@@ -353,8 +337,6 @@
+ 
+ 
+ def make_online(session):
+-    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        session.anchor_scorer = session.target.build_anchor_scorer()
+     return TrainingStep(
+         session.draft,
+         session.components.lm_head,
+@@ -364,7 +346,6 @@
+         objective_chunk_blocks=session.args.objective_chunk_blocks,
+         objective_gradient_checkpointing=session.args.objective_gradient_checkpointing,
+         loss_process_group=session.process_group,
+-        opd_data_mode=getattr(session.args, "opd_data_mode", "teacher_forced"),
+         complete_blocks=getattr(session.args, "complete_blocks", False),
+         supervision_mode=getattr(session.args, "supervision_mode", "sampled"),
+         training_mode=getattr(session.args, "training_mode", "legacy"),
+--- legospec/training/logger/logging.py.before
++++ legospec/training/logger/logging.py
+@@ -595,11 +595,6 @@
+ 
+ 
+ def log_metrics(session, reduced):
+-    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        if "rollout/accepted_length" not in reduced:
+-            raise RuntimeError(
+-                "Sampled anchor OPD requires actual verifier acceptance metrics"
+-            )
+     required = {"hard_label/block_accepted_length", "expected_accept_len"}
+     missing = required.difference(reduced)
+     if missing:
+--- legospec/training/config.py.before
++++ legospec/training/config.py
+@@ -490,17 +490,6 @@
+         default="sampled",
+         help="EAGLE3 loss starts: sampled anchors or every complete eligible block.",
+     )
+-    parser.add_argument(
+-        "--opd-data-mode",
+-        choices=["teacher_forced", "sampled_anchor"],
+-        default="teacher_forced",
+-    )
+-    parser.add_argument(
+-        "--opd-target-chunk-anchors",
+-        type=int,
+-        default=0,
+-        help="Sampled-anchor OPD currently requires 0: score all anchors together.",
+-    )
+     tokens = sys.argv[1:] if argv is None else argv
+     removed = (
+         "--selector-loss-alpha",
+@@ -518,21 +507,6 @@
+     args.complete_blocks = True
+     if not any((token.split("=", 1)[0] == "--num-anchors" for token in tokens)):
+         args.num_anchors = 512
+-    if args.opd_data_mode == "sampled_anchor":
+-        if not any((token.split("=", 1)[0] == "--num-anchors" for token in tokens)):
+-            args.num_anchors = 512
+-        if not any(
+-            (token.split("=", 1)[0] == "--objective-chunk-blocks" for token in tokens)
+-        ):
+-            args.objective_chunk_blocks = 0
+-        if args.objective_chunk_blocks != 0 or args.opd_target_chunk_anchors != 0:
+-            parser.error(
+-                "sampled_anchor processes all anchors; both chunk settings must be 0"
+-            )
+-        if args.disaggregate or args.tp_size != 1:
+-            parser.error("sampled_anchor requires a collocated target, tp_size=1")
+-        if not (args.init_from or args.resume_from):
+-            parser.error("sampled_anchor requires --init-from or --resume-from")
+     for name in ("objective_gradient_checkpointing", "backbone_gradient_checkpointing"):
+         if getattr(args, name) is None:
+             setattr(args, name, args.objective_chunk_blocks > 0)
+--- legospec/training/execution/DESIGN.md.before
++++ legospec/training/execution/DESIGN.md
+@@ -1,3 +1,3 @@
+ # execution
+ 
+-训练计算：step 包含单次 FSDP 前向及调用数据组织；sampled 保存采样 token/uniforms 并重放；supervision 对齐监督行；windows 统计全累积分母并管理临时 batch。不得反调 runtime/setup 或 runner，objective 公式仍归模型 objective。
++训练计算：step 包含单次 FSDP 前向及调用数据组织；supervision 对齐监督行；windows 统计全累积分母并管理临时 batch。不得反调 runtime/setup 或 runner，objective 公式仍归模型 objective。
+--- legospec/training/execution/step.py.before
++++ legospec/training/execution/step.py
+@@ -41,23 +41,6 @@
+     microbatch_end=None,
+     collect_detailed_metrics=False,
+ ):
+-    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        if isinstance(data, PreparedLogicalBatch):
+-            values = data.materialize()
+-            record = values["sampled_opd_batch"].to("cuda")
+-            return session.fsdp_model(
+-                input_ids=values["input_ids"].cuda(non_blocking=True),
+-                loss_mask=values["loss_mask"].cuda(non_blocking=True),
+-                target_hidden_states=None,
+-                context_valid_mask=record.context_valid,
+-                sampled_opd_batch=record,
+-                collect_detailed_metrics=collect_detailed_metrics,
+-            )
+-        return session.fsdp_model(
+-            **_anchor_values(session, data),
+-            opd_scorer=session.anchor_scorer,
+-            collect_detailed_metrics=collect_detailed_metrics,
+-        )
+     prepared = data if isinstance(data, PreparedLogicalBatch) else None
+     data = prepared.materialize() if prepared is not None else data
+     values = _step_values(session, data, microbatch_start, microbatch_end)
+@@ -161,21 +144,6 @@
+     )
+ 
+ 
+-def _anchor_values(session, data):
+-    ids = data["input_ids"].cuda(non_blocking=True)
+-    hidden = last = None
+-    if session.args.train_hidden_states_path:
+-        (hidden, last) = prepare_target_features(data, None, session.draft, True)
+-    return dict(
+-        input_ids=ids,
+-        loss_mask=data["loss_mask"].cuda(non_blocking=True),
+-        target_hidden_states=hidden,
+-        target_last_hidden_states=last,
+-        context_valid_mask=data["attention_mask"].cuda(non_blocking=True).bool(),
+-        layout=anchor_layout(session, data),
+-    )
+-
+-
+ class TrainingStep(nn.Module):
+     def __init__(
+         self,
+@@ -187,7 +155,6 @@
+         objective_chunk_blocks=512,
+         objective_gradient_checkpointing=None,
+         loss_process_group=None,
+-        opd_data_mode="teacher_forced",
+         complete_blocks=False,
+         supervision_mode="sampled",
+         training_mode="legacy",
+@@ -204,6 +171,8 @@
+             raise ValueError(
+                 "Removed Selector loss arguments; configure objective.base/final.weight instead"
+             )
++        if kwargs:
++            raise TypeError("Unexpected TrainingStep arguments: " + ", ".join(kwargs))
+         self.draft_model = draft_model
+         self.lm_head = target_lm_head
+         self.embed_tokens = target_embed_tokens
+@@ -216,7 +185,6 @@
+             else objective_gradient_checkpointing
+         )
+         self.loss_process_group = loss_process_group
+-        self.opd_data_mode = opd_data_mode
+         self.complete_blocks = bool(complete_blocks)
+         self.supervision_mode = supervision_mode
+         if training_mode not in ("legacy", "optimized"):
+@@ -224,13 +192,6 @@
+         self.optimized = training_mode == "optimized"
+         if supervision_mode not in ("sampled", "all"):
+             raise ValueError("supervision_mode must be sampled or all")
+-        if (
+-            getattr(draft_model, "uses_hidden_feedback", False)
+-            and opd_data_mode != "teacher_forced"
+-        ):
+-            raise ValueError(
+-                "EAGLE3 supports fixed-data teacher_forced TTT, not sampled_anchor OPD"
+-            )
+         recipe = draft_model.config.composable_config
+         self.loss_branches = LossBranches(recipe)
+         draft_model.config.composable_config = self.loss_branches.recipe
+@@ -250,31 +211,9 @@
+         epoch_progress=0.0,
+         collect_detailed_metrics=False,
+         context_valid_mask=None,
+-        opd_scorer=None,
+-        sampled_opd_batch=None,
+         execution_plan=None,
+         **removed_loss_arguments,
+     ):
+-        if self.opd_data_mode == "sampled_anchor":
+-            from legospec.training.execution.sampled import forward_anchor_opd
+-
+-            if removed_loss_arguments:
+-                raise ValueError(
+-                    "Unexpected sampled OPD arguments: "
+-                    + ", ".join(removed_loss_arguments)
+-                )
+-            return forward_anchor_opd(
+-                self,
+-                input_ids,
+-                target_hidden_states,
+-                loss_mask,
+-                context_valid_mask=context_valid_mask,
+-                target_last_hidden_states=target_last_hidden_states,
+-                opd_scorer=opd_scorer,
+-                sampled_opd_batch=sampled_opd_batch,
+-                layout=layout,
+-                collect_detailed_metrics=collect_detailed_metrics,
+-            )
+         model = self.draft_model
+         hidden_feedback = getattr(model, "uses_hidden_feedback", False)
+         if removed_loss_arguments:
+--- legospec/training/execution/sampled.py.before
++++ legospec/training/execution/sampled.py
+@@ -1,416 +0,0 @@
+-"""Sample, verify and replay current-policy anchor blocks."""
+-
+-from __future__ import annotations
+-
+-from dataclasses import dataclass, replace
+-from types import SimpleNamespace
+-
+-import torch
+-from torch.utils.checkpoint import checkpoint
+-
+-from legospec.modeling.draft.composable.contracts import (
+-    BackboneOutput,
+-    DraftInputs,
+-    SharedOps,
+-)
+-from legospec.modeling.draft.composable.loss_config import SAMPLED_ANCHOR_OBJECTIVES
+-from legospec.modeling.draft.composable.objective.base import Supervision
+-from legospec.training.data.batch import prepare_sample_epoch_layout
+-from legospec.training.outputs import RatioTerms, TrainingOutput
+-
+-
+-@dataclass
+-class SampledOPDBatch:
+-    layout: object
+-    context_hidden: torch.Tensor
+-    context_valid: torch.Tensor
+-    draft_ids: torch.Tensor
+-    sampled_logq: torch.Tensor
+-    uniforms: torch.Tensor
+-    teacher_hidden: torch.Tensor
+-    accepted_lengths: torch.Tensor | None
+-    seed: int
+-    label_teacher_hidden: torch.Tensor | None = None
+-
+-    def to(self, device):
+-        return replace(
+-            self,
+-            layout=self.layout.to(device),
+-            **{
+-                key: value.to(device, non_blocking=True)
+-                for key, value in vars(self).items()
+-                if isinstance(value, torch.Tensor)
+-            },
+-        )
+-
+-
+-def _generator(device, seed):
+-    return torch.Generator(device=device).manual_seed(seed)
+-
+-
+-@torch.no_grad()
+-def sample_proposal(model, hidden, anchors, lm_head, generator):
+-    """Compact full-vocabulary T=1 sampling, without retained vocab probabilities."""
+-    proposal = model.proposal
+-    logits = lm_head(hidden.detach())
+-    if model.config.composable_config["proposal"]["type"] == "parallel":
+-        logq = torch.log_softmax(logits.float(), -1)
+-        ids = torch.multinomial(
+-            logq.exp().reshape(-1, logq.size(-1)), 1, generator=generator
+-        ).reshape(logq.shape[:-1])
+-        return ids, logq.gather(-1, ids[..., None]).squeeze(-1)
+-    head = proposal.markov_head
+-    state = hidden.new_zeros(*hidden.shape[:2], head.markov_rank)
+-    previous, ids, selected = anchors, [], []
+-    for k in range(hidden.size(-2)):
+-        state, bias = head._rnn_step(
+-            state, head.get_prev_embeddings(previous), hidden[..., k, :].detach()
+-        )
+-        logq = torch.log_softmax((logits[..., k, :] + bias).float(), -1)
+-        token = torch.multinomial(
+-            logq.exp().reshape(-1, logq.size(-1)), 1, generator=generator
+-        ).reshape(previous.shape)
+-        ids.append(token)
+-        selected.append(logq.gather(-1, token[..., None]).squeeze(-1))
+-        previous = token
+-    return torch.stack(ids, -1), torch.stack(selected, -1)
+-
+-
+-@torch.no_grad()
+-def verify_sampled_blocks(teacher_logits, ids, sampled_logq, uniforms, keep):
+-    if (
+-        teacher_logits.shape[:-1] != ids.shape
+-        or ids.shape != sampled_logq.shape
+-        or ids.shape != uniforms.shape
+-    ):
+-        raise ValueError(
+-            "Verifier logits, tokens, proposal logq and uniforms must align"
+-        )
+-    if (
+-        not torch.isfinite(sampled_logq).all()
+-        or ((uniforms < 0) | (uniforms >= 1)).any()
+-    ):
+-        raise ValueError("Verifier requires finite sampled logq and uniforms in [0,1)")
+-    scores = teacher_logits.float()
+-    logp = scores.gather(-1, ids[..., None]).squeeze(-1) - scores.logsumexp(-1)
+-    accepted = uniforms.log() < (logp - sampled_logq).clamp_max(0.0)
+-    return accepted.long().cumprod(-1).sum(-1).masked_fill(~keep, 0)
+-
+-
+-def forward_anchor_opd(
+-    wrapper,
+-    input_ids,
+-    target_hidden_states,
+-    loss_mask,
+-    *,
+-    context_valid_mask,
+-    target_last_hidden_states=None,
+-    opd_scorer=None,
+-    sampled_opd_batch=None,
+-    layout=None,
+-    collect_detailed_metrics=False,
+-    **unused,
+-):
+-    model = wrapper.draft_model
+-    recipe = model.config.composable_config
+-    if (
+-        recipe["proposal"]["type"] not in ("parallel", "rnn")
+-        or recipe["objective"]["type"] not in SAMPLED_ANCHOR_OBJECTIVES
+-    ):
+-        raise ValueError("Sampled anchor OPD requires Parallel/RNN and e2e_tv")
+-    if wrapper.objective_chunk_blocks != 0:
+-        raise ValueError(
+-            "Sampled anchor OPD processes all anchors: objective_chunk_blocks must be 0"
+-        )
+-    if any(
+-        float(getattr(module, "attention_dropout", 0.0)) != 0
+-        for module in model.modules()
+-    ):
+-        raise ValueError("Sampled anchor OPD requires zero attention dropout")
+-    objective = wrapper.loss_branches.objectives["final"]
+-    record = sampled_opd_batch
+-    prefix = None
+-    if record is None:
+-        if opd_scorer is None:
+-            raise ValueError("Fresh anchor OPD collection requires a target scorer")
+-        seed = int(torch.randint(2**31 - 3, (), device=input_ids.device).item())
+-        if layout is None:
+-            layout = prepare_sample_epoch_layout(
+-                input_ids,
+-                loss_mask,
+-                context_valid_mask,
+-                block_size=model.block_size,
+-                num_anchors=wrapper.num_anchors,
+-                seed=torch.initial_seed(),
+-                epoch=0,
+-            ).to(input_ids.device)
+-        else:
+-            layout = layout.to(input_ids.device)
+-        context_valid_mask = context_valid_mask.bool()
+-        if target_hidden_states is None:
+-            prefix = opd_scorer.prefill_anchors(
+-                input_ids,
+-                context_valid_mask,
+-                layout.anchor_positions,
+-                layout.block_keep_mask,
+-                capture_layer_ids=model.target_layer_ids,
+-            )
+-            target_hidden_states = torch.cat(
+-                [prefix.context_hidden[i] for i in model.target_layer_ids], -1
+-            )
+-            prefix.context_hidden.clear()
+-            context_valid_mask = prefix.valid
+-    else:
+-        layout = record.layout
+-        target_hidden_states, context_valid_mask = (
+-            record.context_hidden,
+-            record.context_valid,
+-        )
+-        seed = record.seed
+-    n, a = layout.anchor_positions.shape
+-    anchor_ids = input_ids.gather(1, layout.anchor_positions)
+-    noise = input_ids.new_full((n, a, model.block_size), wrapper.mask_token_id)
+-    noise[..., 0] = anchor_ids.masked_fill(
+-        ~layout.block_keep_mask, wrapper.mask_token_id
+-    )
+-    inputs = DraftInputs(
+-        target_hidden_states=target_hidden_states,
+-        draft_embeddings=wrapper.embed_tokens(noise.flatten(1)),
+-        anchor_positions=layout.anchor_positions,
+-        block_keep_mask=layout.block_keep_mask,
+-        context_valid_mask=context_valid_mask,
+-        prediction_mask=layout.prediction_mask,
+-        mode="features",
+-    )
+-    shared = SharedOps(wrapper.embed_tokens, wrapper.lm_head)
+-    try:
+-        if wrapper.optimized:
+-            from legospec.training.data.batch import (
+-                pack_training_batch,
+-                unpack_block_values,
+-            )
+-
+-            (_, packed_hidden, _, _, packed_valid, packed_layout, plan) = (
+-                pack_training_batch(
+-                    input_ids,
+-                    target_hidden_states,
+-                    loss_mask,
+-                    None,
+-                    context_valid_mask,
+-                    layout,
+-                    model.block_size,
+-                )
+-            )
+-            embeddings = inputs.draft_embeddings.reshape(n, a, model.block_size, -1)
+-            embeddings = (
+-                embeddings.flatten(0, 1)
+-                .index_select(0, plan.kept_block_indices)
+-                .flatten(0, 1)[None]
+-            )
+-            packed_inputs = replace(
+-                inputs,
+-                target_hidden_states=packed_hidden,
+-                draft_embeddings=embeddings,
+-                anchor_positions=packed_layout.anchor_positions,
+-                block_keep_mask=packed_layout.block_keep_mask,
+-                context_valid_mask=packed_valid,
+-                prediction_mask=packed_layout.prediction_mask,
+-                packed_plan=plan,
+-                context_position_ids=plan.context_position_ids[None],
+-                document_ids=torch.repeat_interleave(
+-                    torch.arange(n, device=input_ids.device), plan.lengths
+-                )[None],
+-                anchor_document_ids=plan.block_sample_ids[None],
+-            )
+-            prediction = model(packed_inputs, shared_ops=shared)
+-            prediction.draft_hidden_states = unpack_block_values(
+-                prediction.draft_hidden_states, plan, (n, a)
+-            )
+-            prediction.backbone_hidden_states = unpack_block_values(
+-                prediction.backbone_hidden_states.reshape(
+-                    1, -1, model.block_size, prediction.backbone_hidden_states.size(-1)
+-                ),
+-                plan,
+-                (n, a),
+-            ).flatten(1, 2)
+-        else:
+-            prediction = model(inputs, shared_ops=shared)
+-        block_hidden = prediction.backbone_hidden_states.reshape(
+-            n, a, model.block_size, -1
+-        )
+-        if record is None:
+-            ids, logq = sample_proposal(
+-                model,
+-                prediction.draft_hidden_states,
+-                anchor_ids,
+-                wrapper.lm_head,
+-                _generator(input_ids.device, seed + 1),
+-            )
+-            if prefix is None:
+-                prefix = opd_scorer.prefill_anchors(
+-                    input_ids,
+-                    context_valid_mask,
+-                    layout.anchor_positions,
+-                    layout.block_keep_mask,
+-                )
+-            first = None
+-            if target_last_hidden_states is not None and not getattr(
+-                opd_scorer, "uses_live_anchor_hidden", False
+-            ):
+-                first = target_last_hidden_states.gather(
+-                    1,
+-                    layout.anchor_positions[..., None].expand(
+-                        -1, -1, target_last_hidden_states.size(-1)
+-                    ),
+-                )
+-            teacher_hidden = opd_scorer.score_sampled_blocks(
+-                prefix, ids, cached_anchor_hidden=first
+-            )
+-            label_source = (
+-                target_last_hidden_states
+-                if target_last_hidden_states is not None
+-                else getattr(prefix, "full_hidden", None)
+-            )
+-            label_teacher = None
+-            if label_source is not None:
+-                label_indices = (layout.label_indices - 1).clamp(
+-                    0, label_source.size(1) - 1
+-                )
+-                label_teacher = label_source.gather(
+-                    1,
+-                    label_indices.flatten(1)[..., None].expand(
+-                        -1, -1, label_source.size(-1)
+-                    ),
+-                ).reshape(*layout.labels.shape, -1)
+-            prefix.release()
+-            prefix = None
+-            uniforms = torch.rand(
+-                ids.shape, device=ids.device, generator=_generator(ids.device, seed + 2)
+-            )
+-            accepted_lengths = None
+-            record = SampledOPDBatch(
+-                layout,
+-                target_hidden_states,
+-                context_valid_mask,
+-                ids,
+-                logq,
+-                uniforms,
+-                teacher_hidden,
+-                accepted_lengths,
+-                seed,
+-                label_teacher,
+-            )
+-    finally:
+-        if prefix is not None:
+-            prefix.release()
+-    previous = torch.cat((anchor_ids[..., None], record.draft_ids[..., :-1]), -1)
+-    replay_inputs = replace(inputs, previous_token_ids=previous, mode="teacher_forcing")
+-
+-    def replay(hidden):
+-        output = model.proposal(
+-            BackboneOutput(hidden.flatten(1, 2)),
+-            SimpleNamespace(inputs=replay_inputs),
+-            shared,
+-        )
+-        with torch.no_grad():
+-            teacher_logits = wrapper.lm_head(record.teacher_hidden)
+-        terms = objective(
+-            output,
+-            Supervision(
+-                labels=record.draft_ids,
+-                prediction_mask=layout.prediction_mask,
+-                target_logits=teacher_logits,
+-            ),
+-        )
+-        native = {"loss": terms.loss_terms, **terms.ratio_metrics}
+-        accepted_lengths = record.accepted_lengths
+-        # E2E-TV uses all slots. Verify only when logging, after the loss so
+-        # checkpoint recomputation can stop before these diagnostics.
+-        if collect_detailed_metrics and accepted_lengths is None:
+-            accepted_lengths = verify_sampled_blocks(
+-                teacher_logits,
+-                record.draft_ids,
+-                record.sampled_logq,
+-                record.uniforms,
+-                layout.block_keep_mask,
+-            )
+-        return {
+-            name: (term.numerator, term.denominator) for name, term in native.items()
+-        }, accepted_lengths
+-
+-    values, accepted_lengths = (
+-        checkpoint(replay, block_hidden, use_reentrant=False)
+-        if wrapper.objective_gradient_checkpointing
+-        and wrapper.training
+-        and torch.is_grad_enabled()
+-        else replay(block_hidden)
+-    )
+-    numerator, denominator = values["loss"]
+-    metrics = {"objective/final": RatioTerms(numerator.detach(), denominator)}
+-    metrics.update(
+-        {
+-            f"final/{name}": RatioTerms(*value)
+-            for name, value in values.items()
+-            if name != "loss"
+-        }
+-    )
+-    if accepted_lengths is not None:
+-        blocks = layout.block_keep_mask.sum().float()
+-        metrics["rollout/accepted_length"] = RatioTerms(
+-            accepted_lengths.sum().float(), blocks
+-        )
+-        metrics["rollout/reachable_positions"] = RatioTerms(
+-            (
+-                (accepted_lengths + 1).clamp_max(model.block_size - 1)
+-                * layout.block_keep_mask
+-            )
+-            .sum()
+-            .float(),
+-            blocks,
+-        )
+-    if collect_detailed_metrics:
+-        from legospec.training.logger.metrics import (
+-            acceptance_metric_terms,
+-            final_token_accuracy_terms,
+-        )
+-
+-        if record.label_teacher_hidden is None:
+-            raise ValueError(
+-                "Label acceptance diagnostics require source-text teacher hidden states"
+-            )
+-        with torch.no_grad():
+-            # Match ordinary SFT exactly: gold predecessors for conditional
+-            # rows/expected length, greedy free-running proposal vs data labels
+-            # for the walk. Sampled OPD tokens never become metric labels.
+-            label_inputs = replace(
+-                inputs,
+-                previous_token_ids=layout.previous_token_ids,
+-                mode="teacher_forcing",
+-            )
+-            label_prediction = model.proposal(
+-                BackboneOutput(block_hidden.detach().flatten(1, 2)),
+-                SimpleNamespace(inputs=label_inputs),
+-                shared,
+-            )
+-            label_logits = wrapper.lm_head(record.label_teacher_hidden)
+-            walk, expected, count = acceptance_metric_terms(
+-                model.proposal,
+-                label_prediction,
+-                label_logits,
+-                layout.labels,
+-                layout.previous_token_ids,
+-                layout.prediction_mask,
+-            )
+-            correct, tokens = final_token_accuracy_terms(
+-                label_prediction, layout.labels, layout.prediction_mask
+-            )
+-        metrics["hard_label/block_accepted_length"] = RatioTerms(
+-            walk.float(), count.float()
+-        )
+-        metrics["expected_accept_len"] = RatioTerms(expected.float(), count.float())
+-        metrics["hard_label/token_accuracy"] = RatioTerms(correct, tokens)
+-    return TrainingOutput(
+-        numerator / denominator.clamp_min(1),
+-        RatioTerms(numerator, denominator),
+-        metrics,
+-    )
+--- legospec/training/execution/windows.py.before
++++ legospec/training/execution/windows.py
+@@ -17,8 +17,6 @@
+ 
+ 
+ def prepare_optimizer_window(session, first, iterator, count):
+-    if getattr(session.args, "opd_data_mode", "teacher_forced") == "sampled_anchor":
+-        return None
+     recipe = session.draft.config.composable_config
+     indexer = session.draft.config.indexer_config
+     branches = LossBranches(recipe)
+--- scripts/config/anchor_comparison_sft_rnn.yaml.before
++++ scripts/config/anchor_comparison_sft_rnn.yaml
+@@ -1,56 +0,0 @@
+-algorithm: composable
+-launcher:
+-  target_model: /data/temp/legospec/artifacts/downloads/Qwen3-4B
+-  train_hidden_states: /data/temp/legospec/data/hidden_capture_20261029/full80k/cache
+-  output_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/sft/checkpoints
+-  nnodes: 1
+-  node_rank: 0
+-  nproc_per_node: 8
+-  master_addr: 127.0.0.1
+-  master_port: 29830
+-arguments:
+-  complete_blocks: true
+-  opd_data_mode: teacher_forced
+-  opd_target_chunk_anchors: 0
+-  init_from: /data/temp/legospec/runs/legospec_round2_online_20261026/01__dflash_uniform5__gqa5_dense__rnn_r256__ce0p1_l10p9_g4/checkpoints/final
+-  draft_config: /data/temp/legospec/LEGOSpec/configs/28__dflash__gqa5_dense__rnn_r256__sft_control.json
+-  target_model_backend: hf
+-  attention_backend: flex_attention
+-  flex_attention_backend: TRITON
+-  gdn_backend: fla
+-  chat_template: qwen
+-  max_length: 4096
+-  batch_size: 2
+-  accumulation_steps: 1
+-  tp_size: 1
+-  shard_draft_by_tp: false
+-  dist_timeout: 1200
+-  block_size: 8
+-  num_draft_layers: 5
+-  num_anchors: 512
+-  num_epochs: 4
+-  learning_rate: 0.0003
+-  weight_decay: 0.0
+-  warmup_ratio: 0.04
+-  max_grad_norm: 1.0
+-  use_muon: true
+-  muon_lr: 0.01
+-  muon_momentum: 0.95
+-  muon_weight_decay: 0.0
+-  muon_matrices_per_rank: 1
+-  muon_adamw_lr: 0.0003
+-  muon_adamw_weight_decay: 0.0
+-  seed: 42
+-  objective_chunk_blocks: 0
+-  cache_dir: /data/temp/legospec/runs/anchor_opd_comparison_20261030/runtime
+-  build_dataset_num_proc: 16
+-  dataloader_num_workers: 2
+-  log_interval: 20
+-  save_interval: 15000
+-  save_strategy: interval
+-  save_training_state: true
+-  report_to: none
+-  disaggregate: false
+-  profile: false
+-  verify_hidden_cache_checksums: false
+-  anchor_sampling: sample_epoch
+--- tests/unit/test_target_feature_contract.py.before
++++ tests/unit/test_target_feature_contract.py
+@@ -11,7 +11,6 @@
+ import torch
+ from transformers import Qwen3Config, Qwen3ForCausalLM
+ from legospec.modeling.target.hf import HFTrainingTargetModel
+-from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+ from legospec.training.runtime import setup as setup
+ 
+ 
+@@ -210,34 +209,6 @@
+         self.assertIsNotNone(x.grad)
+         self.assertTrue(all(not p.requires_grad for p in self.model.parameters()))
+ 
+-    def test_sampled_anchor_context_is_raw_and_teacher_is_normalized(self):
+-        scorer = Qwen3AnchorScorer(self.model)
+-        anchors = torch.tensor([[1, 4], [2, 4]])
+-        keep = torch.ones_like(anchors, dtype=torch.bool)
+-        prefix = scorer.prefill_anchors(
+-            self.ids, self.mask.bool(), anchors, keep, capture_layer_ids=[0, 2]
+-        )
+-        with torch.no_grad():
+-            captured = {}
+-            handle = self.model.model.norm.register_forward_pre_hook(
+-                lambda m, a: captured.update(raw=a[0])
+-            )
+-            try:
+-                full = self.model.model(
+-                    self.ids[:, :5],
+-                    attention_mask=self.mask[:, :5],
+-                    output_hidden_states=True,
+-                )
+-            finally:
+-                handle.remove()
+-        torch.testing.assert_close(
+-            prefix.context_hidden[2], captured["raw"], rtol=2e-5, atol=2e-6
+-        )
+-        expected = full.last_hidden_state.gather(
+-            1, anchors[..., None].expand(-1, -1, 16)
+-        )
+-        torch.testing.assert_close(prefix.anchor_hidden, expected, rtol=2e-5, atol=2e-6)
+-        prefix.release()
+ 
+     def test_cached_teacher_feature_is_not_inferred_from_context(self):
+         raw, teacher = torch.randn(2, 7, 16), torch.randn(2, 7, 16)
+--- tests/unit/test_deferred_objectives.py.before
++++ tests/unit/test_deferred_objectives.py
+@@ -20,3 +20,35 @@
+     config["composable_config"]["objective"] = {"type": kind}
+     with pytest.raises(ValueError):
+         LegoSpecConfig(**config)
++
++
++@pytest.mark.parametrize(
++    "arguments",
++    [["--opd-data-mode", "sampled_anchor"], ["--opd-target-chunk-anchors", "0"]],
++)
++def test_deferred_training_options_are_not_cli_arguments(arguments, capsys):
++    from legospec.training.config import parse_args
++
++    with pytest.raises(SystemExit) as error:
++        parse_args(
++            argv=[
++                "--target-model-path",
++                "target",
++                "--train-data-path",
++                "data.jsonl",
++                "--output-dir",
++                "out",
++                "--report-to",
++                "none",
++                *arguments,
++            ]
++        )
++    assert error.value.code == 2
++    assert "unrecognized arguments" in capsys.readouterr().err
++
++
++def test_removed_training_mode_cannot_silently_fall_back():
++    from legospec.training.execution.step import TrainingStep
++
++    with pytest.raises(TypeError, match="Unexpected TrainingStep arguments"):
++        TrainingStep(None, None, None, 0, opd_data_mode="sampled_anchor")
+--- tests/unit/test_e2e_tv_causal.py.before
++++ tests/unit/test_e2e_tv_causal.py
+@@ -1,27 +1,21 @@
+-"""Numerical E2E-TV, sampled replay, and causal query visibility."""
++"""Numerical E2E-TV and causal query visibility."""
+ 
+-import legospec.training.execution.sampled as execution_sampled
+-
++import tempfile
+ from dataclasses import replace
+ from pathlib import Path
+-import tempfile
+-from unittest.mock import Mock
+ 
+ import pytest
+ import torch
+ 
+-from legospec.training.execution import sampled as anchor_opd
++from legospec.modeling.draft.composable import LegoSpecConfig, LegoSpecModel
++from legospec.modeling.draft.composable.contracts import (
++    DraftInputs,
++    DraftState,
++    ProposalOutput,
++)
++from legospec.modeling.draft.composable.export import export_composable
+ from legospec.modeling.draft.composable.objective import build_objective
+ from legospec.modeling.draft.composable.objective.base import Supervision
+-from legospec.training.execution.step import TrainingStep
+-from legospec.modeling.draft.composable import LegoSpecConfig, LegoSpecModel
+-from legospec.modeling.draft.composable.contracts import (
+-    ProposalOutput,
+-    DraftState,
+-    DraftInputs,
+-)
+-from legospec.modeling.draft.composable.export import export_composable
+-from test_anchor_opd import fixture
+ 
+ 
+ def test_formula_gradient_and_complete_blocks():
+@@ -45,10 +39,16 @@
+ 
+ 
+ def model_with_mode(mode, device="cpu", backend="sdpa", conv=True):
+-    old, scorer, values = fixture("rnn", device)
+-    cfg = old.draft_model.config
+-    cfg.execution_config["attention_backend"] = backend
+-    recipe = cfg.composable_config
++    recipe = {
++        "context": {"type": "concat_projection", "target_layer_ids": [0]},
++        "backbone": {
++            "type": "layer_stack",
++            "layers": [{"attention": "gqa", "access": "dense"}],
++        },
++        "attention_configs": {"gqa": {}},
++        "proposal": {"type": "rnn", "rank": 4},
++        "objective": {"type": "e2e_tv"},
++    }
+     if mode is not None:
+         recipe["backbone"]["query_attention"] = mode
+     if conv:
+@@ -57,97 +57,21 @@
+             "kernel_size": 2,
+             "group_size": 4,
+         }
+-    recipe["objective"] = {"type": "e2e_tv"}
+-    model = LegoSpecModel(cfg).to(device)
+-    wrap = TrainingStep(
+-        model,
+-        old.lm_head,
+-        old.embed_tokens,
+-        3,
+-        num_anchors=4,
+-        objective_chunk_blocks=0,
+-        opd_data_mode="sampled_anchor",
++    config = LegoSpecConfig(
++        hidden_size=16,
++        intermediate_size=24,
++        num_hidden_layers=1,
++        num_target_layers=2,
++        vocab_size=23,
++        num_attention_heads=2,
++        num_key_value_heads=1,
++        head_dim=16,
++        block_size=4,
++        attention_dropout=0.0,
++        composable_config=recipe,
++        execution_config={"attention_backend": backend},
+     )
+-    return wrap, scorer, values
+-
+-
+-@pytest.mark.parametrize("mode", ["full_parallel", "causal_parallel"])
+-def test_sampled_opd_e2e_uses_one_target_rollout(mode, monkeypatch):
+-    wrapper, scorer, inputs = model_with_mode(mode)
+-    with torch.no_grad():
+-        teacher = scorer.model.model(
+-            inputs["input_ids"],
+-            attention_mask=inputs["context_valid_mask"],
+-            output_hidden_states=True,
+-        )
+-    inputs.update(
+-        target_hidden_states=teacher.hidden_states[1],
+-        target_last_hidden_states=teacher.last_hidden_state,
+-    )
+-    scored, projected = [], []
+-    score = scorer.score_sampled_blocks
+-
+-    def record_score(*args, **kwargs):
+-        hidden = score(*args, **kwargs)
+-        scored.append(hidden)
+-        return hidden
+-
+-    monkeypatch.setattr(scorer, "score_sampled_blocks", record_score)
+-    verifier = execution_sampled.verify_sampled_blocks
+-    verify = Mock(wraps=verifier)
+-    monkeypatch.setattr(anchor_opd, "verify_sampled_blocks", verify)
+-    hook = wrapper.lm_head.register_forward_hook(
+-        lambda _, args, logits: projected.append((args[0], logits))
+-    )
+-    results = []
+-    try:
+-        for log in (False, True):
+-            torch.manual_seed(123)
+-            wrapper.zero_grad(set_to_none=True)
+-            verify.reset_mock()
+-            projected.clear()
+-            out = wrapper(**inputs, opd_scorer=scorer, collect_detailed_metrics=log)
+-            assert 0 <= out.loss <= 1
+-            assert "final/e2e_tv/expected_prefix" in out.ratio_metrics
+-            (branch_logits,) = (
+-                logits for hidden, logits in projected if hidden is scored[-1]
+-            )
+-            if log:
+-                verify.assert_called_once()
+-                logits, *rollout = verify.call_args.args
+-                assert logits is branch_logits
+-                accepted = out.ratio_metrics["rollout/accepted_length"]
+-                reachable = out.ratio_metrics["rollout/reachable_positions"]
+-                with torch.no_grad():
+-                    reference = verifier(wrapper.lm_head(scored[-1]), *rollout)
+-                assert (
+-                    accepted.denominator
+-                    == reachable.denominator
+-                    == out.loss_terms.denominator
+-                )
+-                torch.testing.assert_close(accepted.numerator, reference.sum().float())
+-                keep = rollout[-1]
+-                torch.testing.assert_close(
+-                    reachable.numerator,
+-                    (
+-                        (reference + 1).clamp_max(wrapper.draft_model.block_size - 1)
+-                        * keep
+-                    )
+-                    .sum()
+-                    .float(),
+-                )
+-            else:
+-                assert not any(key.startswith("rollout/") for key in out.ratio_metrics)
+-            out.loss.backward()
+-            assert verify.call_count == int(log)
+-            grad = wrapper.draft_model.context.projection.weight.grad
+-            assert torch.isfinite(grad).all() and grad.abs().sum() > 0
+-            results.append((out.loss.detach(), grad.detach().clone()))
+-    finally:
+-        hook.remove()
+-    torch.testing.assert_close(results[0], results[1], atol=0, rtol=0)
+-    assert (scorer.prefill_calls, scorer.branch_calls) == (2, 2)
+-    assert all(p.grad is None for p in scorer.model.parameters())
++    return LegoSpecModel(config).to(device)
+ 
+ 
+ def inputs_for(device="cpu"):
+@@ -161,10 +85,8 @@
+ 
+ 
+ def test_causal_prefix_cross_block_and_legacy_full():
+-    wrapper, _, _ = model_with_mode("causal_parallel")
+-    causal = wrapper.draft_model.eval()
+-    legacy, _, _ = model_with_mode(None)
+-    full = legacy.draft_model.eval()
++    causal = model_with_mode("causal_parallel").eval()
++    full = model_with_mode(None).eval()
+     full.load_state_dict(causal.state_dict(), strict=True)
+     inputs = inputs_for()
+     changed = inputs.draft_embeddings.clone()
+@@ -199,7 +121,7 @@
+ def test_causal_export_and_incremental_cache():
+     from transformers import AutoModel
+ 
+-    model = model_with_mode("causal_parallel")[0].draft_model.eval()
++    model = model_with_mode("causal_parallel").eval()
+     data = inputs_for()
+     first = replace(
+         data,
+@@ -241,10 +163,8 @@
+ 
+ @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA FlexAttention")
+ def test_causal_sdpa_flex_and_fused_loss():
+-    sdpa = model_with_mode("causal_parallel", "cuda")[0].draft_model.eval()
+-    flex = model_with_mode("causal_parallel", "cuda", "flex_attention")[
+-        0
+-    ].draft_model.eval()
++    sdpa = model_with_mode("causal_parallel", "cuda").eval()
++    flex = model_with_mode("causal_parallel", "cuda", "flex_attention").eval()
+     flex.load_state_dict(sdpa.state_dict(), strict=True)
+     data = inputs_for("cuda")
+     with torch.no_grad():
+--- tests/unit/test_composable_eagle3.py.before
++++ tests/unit/test_composable_eagle3.py
+@@ -451,7 +451,7 @@
+     assert earlier.abs().sum() > 0
+ 
+ 
+-def test_padding_empty_short_sequences_and_unsupported_opd():
++def test_padding_empty_short_sequences():
+     c = config()
+     model, shared, data = LegoSpecModel(c), components(c), batch(c)
+     data["context_valid_mask"][0, 7:] = False
+@@ -464,14 +464,6 @@
+         out = wrapper(model, shared)(**short)
+         assert out.loss == 0 and out.loss_terms.denominator == 0
+         out.loss.backward()
+-    with pytest.raises(ValueError, match="sampled_anchor"):
+-        TrainingStep(
+-            model,
+-            shared.lm_head,
+-            shared.embed_tokens,
+-            None,
+-            opd_data_mode="sampled_anchor",
+-        )
+ 
+ 
+ def target_model(c):
+--- tests/unit/test_packed_training.py.before
++++ tests/unit/test_packed_training.py
+@@ -215,37 +215,6 @@
+             torch.testing.assert_close(p.grad, q.grad, rtol=1e-4, atol=2e-5, msg=n)
+ 
+ 
+-@pytest.mark.parametrize("proposal", ["parallel", "rnn"])
+-def test_sampled_opd_replay_packs_backbone(proposal):
+-    from test_anchor_opd import fixture
+-
+-    legacy, scorer, data = fixture(proposal)
+-    from unittest.mock import patch
+-    from legospec.training.execution import sampled
+-
+-    records = []
+-    batch_type = sampled.SampledOPDBatch
+-
+-    def capture(*args, **kwargs):
+-        record = batch_type(*args, **kwargs)
+-        records.append(record)
+-        return record
+-
+-    with patch.object(sampled, "SampledOPDBatch", side_effect=capture), torch.no_grad():
+-        legacy(**data, opd_scorer=scorer)
+-    (record,) = records
+-    packed = deepcopy(legacy)
+-    packed.optimized = True
+-    a, b = (
+-        legacy(**data, sampled_opd_batch=record),
+-        packed(**data, sampled_opd_batch=record),
+-    )
+-    torch.testing.assert_close(a.loss, b.loss, rtol=2e-5, atol=2e-6)
+-    a.loss.backward()
+-    b.loss.backward()
+-    for (name, p), (_, q) in zip(legacy.named_parameters(), packed.named_parameters()):
+-        if p.grad is not None:
+-            torch.testing.assert_close(p.grad, q.grad, rtol=1e-4, atol=2e-5, msg=name)
+ 
+ 
+ @pytest.mark.parametrize(
+--- tests/unit/test_anchor_opd.py.before
++++ tests/unit/test_anchor_opd.py
+@@ -1,263 +0,0 @@
+-"""Numerical and lifecycle checks for full-batch sampled-anchor OPD."""
+-
+-import unittest
+-
+-import torch
+-from transformers import Qwen3Config, Qwen3ForCausalLM
+-
+-from legospec.training.execution.sampled import verify_sampled_blocks
+-from legospec.training.execution.step import TrainingStep
+-from legospec.modeling.draft.composable import LegoSpecConfig, LegoSpecModel
+-from legospec.modeling.target.anchor_opd import Qwen3AnchorScorer
+-
+-
+-def target_model(device="cpu", dtype=torch.float32):
+-    torch.manual_seed(9)
+-    config = Qwen3Config(
+-        hidden_size=16,
+-        intermediate_size=32,
+-        num_hidden_layers=2,
+-        num_attention_heads=2,
+-        num_key_value_heads=1,
+-        head_dim=16,
+-        vocab_size=23,
+-        max_position_embeddings=128,
+-        attention_dropout=0.0,
+-    )
+-    config._attn_implementation = "eager"
+-    return (
+-        Qwen3ForCausalLM(config)
+-        .to(device=device, dtype=dtype)
+-        .requires_grad_(False)
+-        .eval()
+-    )
+-
+-
+-def fixture(proposal="parallel", device="cpu", dtype=torch.float32):
+-    target = target_model(device, dtype)
+-    prop = {"type": proposal, **({"rank": 4} if proposal == "rnn" else {})}
+-    config = LegoSpecConfig(
+-        hidden_size=16,
+-        intermediate_size=24,
+-        num_hidden_layers=1,
+-        num_target_layers=2,
+-        vocab_size=23,
+-        num_attention_heads=2,
+-        num_key_value_heads=1,
+-        head_dim=16,
+-        block_size=4,
+-        attention_dropout=0.0,
+-        composable_config={
+-            "context": {"type": "concat_projection", "target_layer_ids": [0]},
+-            "backbone": {
+-                "type": "layer_stack",
+-                "layers": [{"attention": "gqa", "access": "dense"}],
+-            },
+-            "attention_configs": {"gqa": {}},
+-            "proposal": prop,
+-            "objective": {"type": "e2e_tv", "loss_decay_gamma": None},
+-        },
+-    )
+-    draft = LegoSpecModel(config).to(device=device, dtype=dtype)
+-    wrapper = TrainingStep(
+-        draft,
+-        target.lm_head,
+-        target.model.embed_tokens,
+-        3,
+-        num_anchors=4,
+-        objective_chunk_blocks=0,
+-        opd_data_mode="sampled_anchor",
+-    ).to(device)
+-    scorer = Qwen3AnchorScorer(target)
+-    ids = torch.randint(23, (2, 12), device=device)
+-    mask = torch.ones_like(ids).float()
+-    mask[1, 10:] = 0
+-    return (
+-        wrapper,
+-        scorer,
+-        dict(
+-            input_ids=ids,
+-            loss_mask=mask,
+-            context_valid_mask=mask.bool(),
+-            target_hidden_states=None,
+-        ),
+-    )
+-
+-
+-class AnchorOPDTests(unittest.TestCase):
+-    def setUp(self):
+-        torch.set_num_threads(1)
+-
+-    def test_shared_prefix_matches_independent_causal_forward(self):
+-        model = target_model()
+-        scorer = Qwen3AnchorScorer(model)
+-        ids = torch.randint(23, (2, 12))
+-        valid = torch.ones_like(ids).bool()
+-        valid[1, 10:] = False
+-        anchors = torch.tensor([[1, 5, 7], [2, 6, 0]])
+-        keep = torch.tensor([[True, True, True], [True, True, False]])
+-        draft = torch.randint(23, (2, 3, 3))
+-        prefix = scorer.prefill_anchors(
+-            ids, valid, anchors, keep, capture_layer_ids=[0, 1]
+-        )
+-        actual = scorer.score_sampled_blocks(prefix, draft)
+-        for n, a in keep.nonzero().tolist():
+-            length = anchors[n, a].item() + 1
+-            sequence = torch.cat((ids[n, :length], draft[n, a, :-1]))[None]
+-            expected = model.model(
+-                sequence, output_hidden_states=True
+-            ).last_hidden_state[:, length - 1 :]
+-            torch.testing.assert_close(actual[n, a], expected[0], atol=2e-6, rtol=2e-5)
+-        full = model.model(ids[:, :8], output_hidden_states=True)
+-        torch.testing.assert_close(
+-            prefix.context_hidden[0], full.hidden_states[1], atol=2e-6, rtol=2e-5
+-        )
+-        torch.testing.assert_close(
+-            model.model.norm(prefix.context_hidden[1]),
+-            full.last_hidden_state,
+-            atol=2e-6,
+-            rtol=2e-5,
+-        )
+-        self.assertEqual(prefix.key_values[0][0].shape[0], 2)
+-        prefix.release()
+-        self.assertEqual(prefix.key_values, [])
+-
+-    def test_no_future_or_other_branch_leakage(self):
+-        scorer = Qwen3AnchorScorer(target_model())
+-        ids = torch.randint(23, (1, 12))
+-        valid = torch.ones_like(ids).bool()
+-        anchors = torch.tensor([[2, 7]])
+-        keep = torch.ones_like(anchors).bool()
+-        draft = torch.randint(23, (1, 2, 3))
+-        prefix = scorer.prefill_anchors(ids, valid, anchors, keep)
+-        before = scorer.score_sampled_blocks(prefix, draft)
+-        other = draft.clone()
+-        other[:, 0] = (other[:, 0] + 1) % 23
+-        after = scorer.score_sampled_blocks(prefix, other)
+-        torch.testing.assert_close(before[:, 1], after[:, 1])
+-        changed = ids.clone()
+-        changed[:, 3:] = (changed[:, 3:] + 1) % 23
+-        after = scorer.score_sampled_blocks(
+-            scorer.prefill_anchors(changed, valid, anchors, keep), draft
+-        )
+-        torch.testing.assert_close(before[:, 0], after[:, 0])
+-
+-    def test_probabilistic_verifier_and_first_rejection(self):
+-        p = torch.tensor([[[[0.2, 0.8], [0.9, 0.1], [0.5, 0.5]]]])
+-        ids = torch.zeros(1, 1, 3).long()
+-        logq = torch.tensor([[[0.8, 0.9, 0.5]]]).log()
+-        # First acceptance probability is 0.25: it can reject even though the
+-        # same token is proposed. Later decisions cannot revive a prefix.
+-        for uniforms, expected in [([0.1, 0.2, 0.3], 3), ([0.3, 0.1, 0.1], 0)]:
+-            r = verify_sampled_blocks(
+-                p.log(), ids, logq, torch.tensor([[uniforms]]), torch.ones(1, 1).bool()
+-            )
+-            self.assertEqual(r.item(), expected)
+-        with self.assertRaises(ValueError):
+-            verify_sampled_blocks(
+-                p.log(), ids, logq, torch.ones_like(logq), torch.ones(1, 1).bool()
+-            )
+-
+-    def test_fast_forward_and_checkpoint_do_not_resample_target(self):
+-        wrapper, scorer, values = fixture("rnn")
+-        calls = []
+-        hook = wrapper.draft_model.backbone.register_forward_hook(
+-            lambda *args: calls.append(1)
+-        )
+-        output = wrapper(**values, opd_scorer=scorer)
+-        self.assertEqual(len(calls), 1)
+-        output.loss.backward()
+-        hook.remove()
+-        self.assertEqual((scorer.prefill_calls, scorer.branch_calls), (1, 1))
+-
+-    def test_cached_and_live_context_loss_gradients_match(self):
+-        wrapper, scorer, values = fixture("rnn")
+-        with torch.no_grad():
+-            original = scorer.model.model(
+-                values["input_ids"],
+-                attention_mask=values["context_valid_mask"],
+-                output_hidden_states=True,
+-            )
+-        cached_values = dict(
+-            values,
+-            target_hidden_states=original.hidden_states[1],
+-            target_last_hidden_states=original.last_hidden_state,
+-        )
+-        results = []
+-        for current in (values, cached_values):
+-            wrapper.zero_grad(set_to_none=True)
+-            torch.manual_seed(101)
+-            out = wrapper(**current, opd_scorer=scorer)
+-            out.loss.backward()
+-            results.append(
+-                (
+-                    out.loss.detach(),
+-                    {
+-                        n: p.grad.clone()
+-                        for n, p in wrapper.named_parameters()
+-                        if p.grad is not None
+-                    },
+-                )
+-            )
+-        torch.testing.assert_close(results[0][0], results[1][0], atol=3e-6, rtol=3e-5)
+-        for name in results[0][1]:
+-            torch.testing.assert_close(
+-                results[0][1][name], results[1][1][name], atol=3e-6, rtol=3e-5
+-            )
+-
+-    def test_empty_rank_and_no_complete_blocks(self):
+-        wrapper, scorer, values = fixture()
+-        values["loss_mask"][1] = 0
+-        output = wrapper(**values, opd_scorer=scorer)
+-        self.assertTrue(torch.isfinite(output.loss))
+-        output.loss.backward()
+-        values["loss_mask"].zero_()
+-        wrapper.zero_grad(set_to_none=True)
+-        empty = wrapper(**values, opd_scorer=scorer)
+-        self.assertEqual(empty.loss.item(), 0)
+-        self.assertEqual(empty.loss_terms.denominator.item(), 0)
+-        empty.loss.backward()
+-        self.assertTrue(
+-            all(
+-                p.grad is None or not p.grad.count_nonzero()
+-                for p in wrapper.draft_model.parameters()
+-            )
+-        )
+-
+-    def test_online_cli_defaults_and_explicit_chunk_rejection(self):
+-        from legospec.training.config import parse_args
+-        from contextlib import redirect_stderr
+-        import io
+-
+-        argv = [
+-            "--target-model-path",
+-            "target",
+-            "--train-data-path",
+-            "data.jsonl",
+-            "--output-dir",
+-            "out",
+-            "--opd-data-mode",
+-            "sampled_anchor",
+-            "--init-from",
+-            "checkpoint",
+-            "--report-to",
+-            "none",
+-        ]
+-        args = parse_args(argv=argv)
+-        self.assertEqual(args.objective_chunk_blocks, 0)
+-        self.assertEqual(args.opd_target_chunk_anchors, 0)
+-        self.assertEqual(args.num_anchors, 512)
+-        # The existing SGLangAnchorScorer supports the same collocated TP=1 path.
+-        sglang_args = parse_args(argv=argv + ["--target-model-backend", "sglang"])
+-        self.assertEqual(sglang_args.target_model_backend, "sglang")
+-        for extra in (
+-            ["--objective-chunk-blocks", "32"],
+-            ["--opd-target-chunk-anchors", "128"],
+-            ["--tp-size", "2"],
+-        ):
+-            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+-                parse_args(argv=argv + extra)
+-
+-
+-if __name__ == "__main__":
+-    unittest.main()
+--- tests/unit/test_disaggregated_streaming_windows.py.before
++++ tests/unit/test_disaggregated_streaming_windows.py
+@@ -182,7 +182,7 @@
+     )
+     data = packet(row)
+     session = SimpleNamespace(
+-        args=SimpleNamespace(opd_data_mode="teacher_forced"),
++        args=SimpleNamespace(),
+         draft=SimpleNamespace(config=model.draft_model.config, block_size=8),
+         topology=object(),
+         process_group=None,
+--- docs/SGLANG_RUNTIME.md.before
++++ docs/SGLANG_RUNTIME.md
+@@ -38,7 +38,8 @@
+ and token offsets from the same engine. Each prefill releases its request/KV
+ pool allocations, including on forward failure.
+ 
+-The anchor scorer uses native EXTEND ranges and shared prefix slots. Collocated
++The former OPD anchor scorer is now deferred under development/opd and has no
++active backend entrypoint. Collocated
+ teachers use TP-scoped SGLang groups; disaggregated teachers reuse process groups
+ created before the target/draft split. The trainer WORLD is preserved.
+ 
+@@ -53,6 +54,8 @@
+ teacher logits and trainable draft-projection backward. Qwen3 shared-prefix
+ anchor scoring was also compared with independent causal branches; BF16
+ relative L2 error was below 0.81%, with minimum cosine similarity above 0.99994.
++The anchor results describe the environment-upgrade snapshot before OPD was
++deferred; current mainline no longer supports that training path.
+ These are short-prefill checks, not acceptance benchmarks or long training runs.
+ 
+ See environment_after.json, freeze_after.txt, regression.log and the model result
+--- docs/SIMPLIFICATION_PLAN.md.before
++++ docs/SIMPLIFICATION_PLAN.md
+@@ -15,3 +15,5 @@
+ 2026-11-22 target 边界重组：拆出 training/target/setup；HF/SGLang 复用模型 adapter，移除 Gemma 独立 training backend；统一层字典与显式 final-norm teacher，移除训练端模型内部访问和重复 cached logits 路径。
+ 
+ 2026-11-23 capture 边界收尾：删除 Gemma 专属 capture 文件/数据层构造分支；native capture 和并行运行时归 backend，模型 final norm 重建归 adapter。其余尚未实施的边界建议详见 TARGET_CAPTURE_PLAN.md。
++
++2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tests/defer_opd_20261123/。
+--- docs/TARGET_CAPTURE_PLAN.md.before
++++ docs/TARGET_CAPTURE_PLAN.md
+@@ -8,17 +8,15 @@
+ legospec/modeling/target/
+ ├── training_target_model.py       # 统一构造入口与训练输出
+ ├── hf.py                         # HF forward / shared components
+-├── sglang.py                     # 统一 native 执行、padded/packed 输出与 scorer
++├── sglang.py                     # 统一 native 执行、padded/packed 输出
+ ├── components.py                 # 共享 embedding/head、TP 与权重加载
+ ├── adapters/
+ │   ├── base.py                   # 默认模型结构与捕获语义
+ │   ├── gemma.py                  # 缩放、softcap、配置、final norm 重建
+ │   └── qwen35.py                 # Qwen3.5/3.6 特有捕获接口
+-├── sglang_backend/
+-│   ├── capture.py                # 通用 native packed capture 执行与资源生命周期
+-│   └── parallel.py               # collocated/disaggregated TP runtime 接入已有 WORLD
+-├── anchor_opd.py                  # 当前 Qwen3 HF anchor 数学
+-└── sglang_anchor_opd.py           # 当前 Qwen3 SGLang anchor 执行
++└── sglang_backend/
++    ├── capture.py                # 通用 native packed capture 执行与资源生命周期
++    └── parallel.py               # collocated/disaggregated TP runtime 接入已有 WORLD
+ 
+ legospec/training/target/
+ ├── setup.py                      # 训练需求、预算、tokenizer/mask、装配
+@@ -57,7 +55,7 @@
+ 优先级二：custom_backend 的完整模型副本。
+ 静态检查在活动 legospec/scripts/tests/unit 中未找到目录外消费者；目录内部仍维护多套完整模型。建议先核查动态加载/发布入口，再移到 development 或删除，避免形成第二条目标模型维护路径。没有在本轮删除这些未涉及文件。
+ 
+-保留的合理边界：anchor scorer 的 Qwen3 专属数学有明确模型限制，属于尚未泛化的真实实现，不应伪装成默认任意模型 scorer；chat template 属于数据格式而非 target 计算；cache 编码、传输、磁盘预算继续归 data。现有缓存字段/CLI `recompute_gemma4_final_norm` 是存储命名，未在本轮改变格式。
++2026-11-23：OPD scorer、采样/回放和训练集成已移到 development/opd，当前版本不支持。其余保留的边界：chat template 属于数据格式而非 target 计算；cache 编码、传输、磁盘预算继续归 data。现有缓存字段/CLI `recompute_gemma4_final_norm` 是存储命名，未在本轮改变格式。
+ 
+ ## 验证记录
+ 
+--- docs/COMPONENT_ORGANIZATION.md.before
++++ docs/COMPONENT_ORGANIZATION.md
+@@ -33,3 +33,5 @@
+ Target 的 backend 与模型 adapter 分离：HF/SGLang 管执行与资源；默认/Gemma/Qwen3.5 adapter 管模型语义与 capture 差异。训练 target/setup 只提出训练需求，features 只组装特征，streaming 只调度生产/传输。最后一层 residual 和 normalized teacher 输出分开，详见 modeling/target/DESIGN.md。
+ 
+ 2026-11-23：native packed capture 与 TP runtime 收入 target/sglang_backend；在线和离线共用 target factory 与 LEGOSpec 分布式初始化。Gemma 的 final norm 重建也归 adapter。其余边界检查和后续结构计划见 TARGET_CAPTURE_PLAN.md。
++
++2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tests/defer_opd_20261123/。
+--- development/objectives/README.md.before
++++ development/objectives/README.md
+@@ -19,7 +19,9 @@
+ ## 恢复开发
+ 
+ 快照不是独立可运行插件。恢复时应将相关公式与注册、schema、训练分支合并到届时的代码，并恢复专属测试；不要整文件覆盖持续演进的共享模块。
+-普通 `dpal_renyi`、`dpace`、`e2e_tv` 仍在主代码中。采样训练共用的 E2E-TV 路径保留。
++普通 `dpal_renyi`、`dpace`、`e2e_tv` 仍在主代码中。普通固定数据监督的 E2E-TV 路径保留。
+ 历史 checkpoint、模型发布目录、训练源码快照未迁移。旧目标的完整 resume 仍应使用原始训练环境、配置及 rank topology。
+ 
+ 2026-11-22 训练目录重组：其余 OPD component-normalization、metadata window/replay 集成在移出前完整保存在 `training_snapshots_20261122/`。该快照使用重组前的导入路径；恢复时按新功能归属合并。
++
++2026-11-23：sampled-anchor OPD 的剩余 scorer、采样/回放与训练集成移至 ../opd/；当前正式训练不支持 OPD。此前 objective 快照继续保留在这里。

@@ -1,0 +1,8 @@
+{
+  "designs": [
+    "legospec/data/DESIGN.md",
+    "legospec/modeling/DESIGN.md",
+    "legospec/training/DESIGN.md"
+  ],
+  "broken_design_links": []
+}

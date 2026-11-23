@@ -7,5 +7,8 @@ def extract(row):
         "source": row.get("source") or "legospec_mix1712773",
         # The shared converter assigns sequential output IDs. Keep the original
         # identity for matching prompts back to the completed training data.
-        "category": {"original_id": row["id"], "original_category": row.get("category")},
+        "category": {
+            "original_id": row["id"],
+            "original_category": row.get("category"),
+        },
     }

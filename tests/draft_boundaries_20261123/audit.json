@@ -1,0 +1,93 @@
+{
+  "training_imports_in_draft": [],
+  "old_import_paths": [],
+  "old_directory_exists": false,
+  "python_files": 43,
+  "structure": {
+    "modeling.py": {
+      "lines": 149,
+      "definitions": [
+        "LegoSpecModel"
+      ]
+    },
+    "configuration.py": {
+      "lines": 108,
+      "definitions": [
+        "LegoSpecConfig"
+      ]
+    },
+    "schema.py": {
+      "lines": 235,
+      "definitions": [
+        "fields",
+        "integer",
+        "number",
+        "boolean",
+        "execution_options",
+        "check_objective",
+        "normalize_recipe"
+      ]
+    },
+    "runtime_config.py": {
+      "lines": 423,
+      "definitions": [
+        "_validate_expanded",
+        "runtime_recipe",
+        "_execution_recipe"
+      ]
+    },
+    "contracts.py": {
+      "lines": 89,
+      "definitions": [
+        "DraftInputs",
+        "SelectionView",
+        "IndexerAux",
+        "ContextOutput",
+        "BackboneOutput",
+        "ProposalOutput",
+        "SharedOps"
+      ]
+    },
+    "backbone/model.py": {
+      "lines": 326,
+      "definitions": [
+        "Layer",
+        "Backbone"
+      ]
+    },
+    "backbone/state.py": {
+      "lines": 87,
+      "definitions": [
+        "LayerState",
+        "MLALayerState",
+        "DraftState",
+        "IndexerKeyState"
+      ]
+    },
+    "backbone/stepwise.py": {
+      "lines": 123,
+      "definitions": [
+        "HiddenFeedbackState",
+        "training_mask",
+        "rollout_hidden_feedback",
+        "extend_hidden_feedback"
+      ]
+    },
+    "objective/base.py": {
+      "lines": 85,
+      "definitions": [
+        "Supervision",
+        "Objective",
+        "position_weights",
+        "apply_exponential_position_decay"
+      ]
+    },
+    "objective/outputs.py": {
+      "lines": 24,
+      "definitions": [
+        "RatioTerms",
+        "ObjectiveOutput"
+      ]
+    }
+  }
+}

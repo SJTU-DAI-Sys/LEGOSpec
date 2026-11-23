@@ -1,12 +1,11 @@
 {
   "architectures": [
-    "ComposableDraftModel"
+    "LegoSpecModel"
   ],
   "block_size": 8,
-  "schema_version": "composable_v3",
   "composable_config": {
     "context": {
-      "type": "dflash",
+      "type": "concat_projection",
       "target_layer_ids": [
         1,
         9,
@@ -19,46 +18,61 @@
       "type": "layer_stack",
       "layers": [
         {
-          "attention": "gqa",
-          "access": "sliding_window",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "swa"
+          },
           "local_operator": {
-            "type": "dflash2_conv",
+            "type": "grouped_conv",
             "kernel_size": 2,
             "group_size": 16
           }
         },
         {
-          "attention": "gqa",
-          "access": "sliding_window",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "swa"
+          },
           "local_operator": {
-            "type": "dflash2_conv",
+            "type": "grouped_conv",
             "kernel_size": 2,
             "group_size": 16
           }
         },
         {
-          "attention": "gqa",
-          "access": "sliding_window",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "swa"
+          },
           "local_operator": {
-            "type": "dflash2_conv",
+            "type": "grouped_conv",
             "kernel_size": 2,
             "group_size": 16
           }
         },
         {
-          "attention": "gqa",
-          "access": "sliding_window",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "swa"
+          },
           "local_operator": {
-            "type": "dflash2_conv",
+            "type": "grouped_conv",
             "kernel_size": 2,
             "group_size": 16
           }
         },
         {
-          "attention": "gqa",
-          "access": "sliding_window",
+          "attention": {
+            "family": "dense",
+            "variant": "gqa",
+            "access": "swa"
+          },
           "local_operator": {
-            "type": "dflash2_conv",
+            "type": "grouped_conv",
             "kernel_size": 2,
             "group_size": 16
           }
@@ -84,7 +98,7 @@
       ]
     },
     "access_configs": {
-      "sliding_window": {
+      "swa": {
         "window_size": 2048
       }
     },

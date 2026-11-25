@@ -80,11 +80,11 @@
       ]
     },
     "proposal": {
-      "type": "selector",
+      "type": "topk_selector",
       "rank": 256,
       "top_k": 16,
-      "stop_gradient": false,
-      "selector_mode": "full_vocab_residual"
+      "selector_mode": "candidate_only",
+      "stop_gradient": false
     },
     "objective": {
       "type": "selector_losses",

@@ -58,3 +58,5 @@ tests/**/files.json
 
 # Local experiments, debugging, profiling, snapshots and generated test output
 /tmp_exp/
+/AGENTS.md
+/.cursor/

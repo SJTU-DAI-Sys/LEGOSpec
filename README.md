@@ -63,10 +63,9 @@ arguments:
 
 This example requires enough GPU memory for the target, draft, optimizer, and activations. Adjust the batch size, sequence length, and GPU topology for your hardware.
 
-Inspect the launch command, then start training:
+Start training:
 
 ```bash
-bash scripts/composable/run_training_composable.sh train.yaml --dry-run
 bash scripts/composable/run_training_composable.sh train.yaml
 ```
 

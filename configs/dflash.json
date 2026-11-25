@@ -24,9 +24,7 @@
             "access": "full"
           },
           "local_operator": {
-            "type": "grouped_conv",
-            "kernel_size": 2,
-            "group_size": 16
+            "type": "none"
           }
         },
         {
@@ -36,9 +34,7 @@
             "access": "full"
           },
           "local_operator": {
-            "type": "grouped_conv",
-            "kernel_size": 2,
-            "group_size": 16
+            "type": "none"
           }
         },
         {
@@ -48,9 +44,7 @@
             "access": "full"
           },
           "local_operator": {
-            "type": "grouped_conv",
-            "kernel_size": 2,
-            "group_size": 16
+            "type": "none"
           }
         },
         {
@@ -60,9 +54,7 @@
             "access": "full"
           },
           "local_operator": {
-            "type": "grouped_conv",
-            "kernel_size": 2,
-            "group_size": 16
+            "type": "none"
           }
         },
         {
@@ -72,31 +64,17 @@
             "access": "full"
           },
           "local_operator": {
-            "type": "grouped_conv",
-            "kernel_size": 2,
-            "group_size": 16
+            "type": "none"
           }
         }
       ]
     },
     "proposal": {
-      "type": "topk_selector",
-      "rank": 256,
-      "top_k": 16,
-      "stop_gradient": false,
-      "selector_mode": "candidate_only"
+      "type": "parallel"
     },
     "objective": {
-      "type": "selector_losses",
-      "loss_decay_gamma": 4.0,
-      "base": {
-        "type": "hard_ce",
-        "weight": 1.0
-      },
-      "final": {
-        "type": "hard_ce",
-        "weight": 1.0
-      }
+      "type": "hard_ce",
+      "loss_decay_gamma": 4.0
     },
     "access_configs": {
       "full": {}

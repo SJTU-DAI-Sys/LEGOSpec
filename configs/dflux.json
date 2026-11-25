@@ -21,7 +21,7 @@
           "attention": {
             "family": "dense",
             "variant": "gqa",
-            "access": "full"
+            "access": "swa"
           },
           "local_operator": {
             "type": "grouped_conv",
@@ -33,7 +33,7 @@
           "attention": {
             "family": "dense",
             "variant": "gqa",
-            "access": "full"
+            "access": "swa"
           },
           "local_operator": {
             "type": "grouped_conv",
@@ -45,7 +45,7 @@
           "attention": {
             "family": "dense",
             "variant": "gqa",
-            "access": "full"
+            "access": "swa"
           },
           "local_operator": {
             "type": "grouped_conv",
@@ -57,7 +57,7 @@
           "attention": {
             "family": "dense",
             "variant": "gqa",
-            "access": "full"
+            "access": "swa"
           },
           "local_operator": {
             "type": "grouped_conv",
@@ -80,26 +80,31 @@
       ]
     },
     "proposal": {
-      "type": "topk_selector",
+      "type": "residual_selector",
       "rank": 256,
       "top_k": 16,
-      "stop_gradient": false,
-      "selector_mode": "candidate_only"
+      "selector_mode": "full_vocab_residual",
+      "stop_gradient": false
     },
     "objective": {
       "type": "selector_losses",
-      "loss_decay_gamma": 4.0,
+      "loss_decay_gamma": null,
       "base": {
-        "type": "hard_ce",
-        "weight": 1.0
+        "type": "soft_ce",
+        "weight": 0.2
       },
       "final": {
-        "type": "hard_ce",
-        "weight": 1.0
+        "type": "dpal_renyi",
+        "weight": 1.0,
+        "rho": 0.3,
+        "reduction": "complete_block_mean"
       }
     },
     "access_configs": {
-      "full": {}
+      "full": {},
+      "swa": {
+        "window_size": 512
+      }
     },
     "attention_configs": {
       "gqa": {

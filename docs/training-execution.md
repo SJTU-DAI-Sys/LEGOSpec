@@ -61,6 +61,6 @@ A weights-only checkpoint can initialize a new run through `init_from`. It canno
 
 ## Validate your setup
 
-Use `--dry-run` on the launcher to inspect its command and `python -m scripts.composable.train --help` to see supported arguments. The [test suite](../tests/README.md) covers losses, gradients, planning, prefetch lifecycle, distributed protocols, and restoration.
+Run `python -m scripts.composable.train --help` to see supported arguments. The [test suite](../tests/README.md) covers losses, gradients, planning, prefetch lifecycle, distributed protocols, and restoration.
 
 Measure acceptance and decoding throughput separately on your target model and hardware. Training correctness tests do not establish end-to-end speedups.

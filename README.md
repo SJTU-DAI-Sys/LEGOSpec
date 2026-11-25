@@ -2,7 +2,7 @@
   <img src="assets/legospec_logo.svg" alt="LEGOSpec logo" width="480"/>
 </p>
 
-# LEGOSpec
+# LEGOSpec: A Composable and Efficient Framework for Speculative Draft Design and Training
 
 LEGOSpec trains and runs speculative draft models for a frozen target language model. Build a draft by choosing how it combines target hidden states (**Context**), processes them (**Backbone**), predicts tokens (**Proposal**), and learns from supervision (**Objective**).
 

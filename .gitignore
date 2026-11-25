@@ -6,7 +6,7 @@ build/
 dist/
 .venv/
 tests/artifacts/
-model_publish/*.safetensors
+/model_publish/
 
 # Local environments, generated binaries, model weights and datasets
 .venv

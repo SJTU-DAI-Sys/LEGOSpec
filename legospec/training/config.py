@@ -141,7 +141,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         "--async-schedule-planning",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="CPU lookahead; defaults on in optimized collocated offline mode.",
+        help="Plan the next window on CPU during optimized collocated training; defaults on offline.",
     )
     data.add_argument("--build-dataset-num-proc", type=int, default=8)
     data.add_argument("--cache-dir", default="./cache/train")
@@ -427,9 +427,9 @@ def resolve_execution_options(args):
         raise ValueError("cpu-batch-prefetch must be nonnegative")
     if args.cpu_batch_prefetch and not (offline and collocated):
         raise ValueError("cpu-batch-prefetch requires collocated offline training")
-    if args.async_schedule_planning and not (optimized and offline and collocated):
+    if args.async_schedule_planning and not (optimized and collocated):
         raise ValueError(
-            "async-schedule-planning requires optimized collocated offline training"
+            "async-schedule-planning requires optimized collocated training"
         )
     if int(getattr(args, "dataloader_prefetch_factor", 2)) < 1:
         raise ValueError("dataloader-prefetch-factor must be positive")

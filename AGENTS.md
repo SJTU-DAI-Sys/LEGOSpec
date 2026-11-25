@@ -93,8 +93,8 @@ credible prompt candidate exists.
 
 ## 模块边界与文件粒度
 
-修改组件前阅读 `docs/COMPONENT_ORGANIZATION.md`、`docs/SIMPLIFICATION_PLAN.md`
-和 legospec/data、modeling、training 中对应模块的 `DESIGN.md`。文档中的待实施接口不是现有 API；文件粒度以简化计划为准。
+修改组件前阅读 legospec/data、modeling、training 中对应模块的 `DESIGN.md`。
+仓库仅在这三个目录保留 DESIGN.md，使用英文描述当前职责和接口。README 面向用户使用；docs/ 仅保留核心配置、运行环境和训练指南，历史计划及审查记录归档到 tmp_exp/。
 保持 Context、Backbone、Proposal、Objective 的职责边界，算法名称只作为配方，不新增完整算法维护路径。
 组件可以同文件不同类/函数；不要求每个类、head、状态、注册项各建文件。
 单次使用的处理就近实现；只有真实复用、独立复杂数学、可选依赖或资源生命周期才拆共享模块。

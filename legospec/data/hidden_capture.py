@@ -1,86 +1,28 @@
-"""Bounded asynchronous hidden capture with raw-tar output."""
+"""Bounded asynchronous hidden capture and capture metrics."""
 
 from __future__ import annotations
-import argparse
-from concurrent.futures import ThreadPoolExecutor
+
+import functools
 import hashlib
 import json
-from pathlib import Path
+import os
 import queue
+import resource
 import shutil
 import threading
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
 import torch
 import torch.distributed as dist
-from legospec.data import capture_io
+
+from legospec.data.hidden_cache import atomic_write_json, persist_cache, sha256_file
 
 DEFAULT_LAYER_IDS = [1, 9, 17, 25, 33]
-
-
-def parse_args(argv=None):
-    p = argparse.ArgumentParser(add_help=False)
-    p.add_argument("--target-model-backend", choices=["hf", "sglang"], default="sglang")
-    p.add_argument("--pipeline-depth", type=int, default=2)
-    p.add_argument("--writer-workers", type=int, default=2)
-    p.add_argument("--max-pending-bytes", type=int, default=8 * 1024**3)
-    p.add_argument("--max-batch-tokens", type=int, default=0)
-    p.add_argument(
-        "--packed-requests", action=argparse.BooleanOptionalAction, default=True
-    )
-    p.add_argument("--batch-order", choices=["original", "bucket"], default="original")
-    p.add_argument(
-        "--rank-assignment",
-        choices=["contiguous", "token-balanced"],
-        default=None,
-        help="Explicit DP assignment; unset preserves the coupled bucket policy",
-    )
-    p.add_argument("--tar-shard-bytes", type=int, default=2 * 1024**3)
-    p.add_argument("--tar-commit-workers", type=int, default=1)
-    p.add_argument("--tar-pending-commits", type=int, default=2)
-    p.add_argument("--tar-buffer-bytes", type=int, default=4 * 1024**2)
-    p.add_argument("--clear-cache", action="store_true")
-    p.add_argument(
-        "--recompute-gemma4-final-norm",
-        action="store_true",
-        help="Store Gemma 4 Unified decoder states only in raw tar",
-    )
-    p.add_argument(
-        "--check-finite",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Check generated hidden values before writing; benchmarks may audit outside timing",
-    )
-    if argv is not None and "--help" in argv:
-        p.print_help()
-    (own, rest) = p.parse_known_args(argv)
-    args = capture_io.parse_args(
-        ["--target-model-backend", own.target_model_backend, *rest]
-    )
-    for key, value in vars(own).items():
-        setattr(args, key, value)
-    if (
-        min(
-            args.pipeline_depth,
-            args.writer_workers,
-            args.max_pending_bytes,
-            args.tar_buffer_bytes,
-            args.tar_commit_workers,
-            args.tar_pending_commits,
-        )
-        <= 0
-    ):
-        p.error("pipeline and writer limits must be positive")
-    if (
-        args.packed_requests or args.max_batch_tokens
-    ) and args.target_model_backend != "sglang":
-        p.error(
-            "Packed capture requires SGLang; select --target-model-backend sglang or disable packed capture with --no-packed-requests and --max-batch-tokens 0"
-        )
-    if args.max_batch_tokens < 0:
-        p.error("token budget must be nonnegative")
-    if args.tar_shard_bytes < 0:
-        p.error("Tar shard byte limit must be nonnegative")
-    return args
 
 
 class Slot:
@@ -233,11 +175,9 @@ class Pipeline:
                     break
                 except queue.Empty:
                     pass
-        hidden = capture_io.normalize_hidden_states(output.hidden_states, None)
+        hidden = normalize_hidden_states(output.hidden_states, None)
         if sorted(hidden) != self.args.capture_layer_ids:
-            raise capture_io.HiddenStateError(
-                f"unexpected capture layers: {sorted(hidden)}"
-            )
+            raise HiddenStateError(f"unexpected capture layers: {sorted(hidden)}")
         recompute_final = self.args.recompute_gemma4_final_norm
         normalized_final = None if recompute_final else output.final_hidden_state
         if normalized_final is not None:
@@ -314,7 +254,7 @@ class Pipeline:
             }
             if not self.args.recompute_gemma4_final_norm:
                 payload["final_hidden_state"] = hidden.pop("teacher_final")
-            from legospec.data.hidden_tar_raw import RawSample
+            from legospec.data.hidden_cache import RawSample
 
             value = RawSample(payload)
             return (record["source_index"], value, metadata(record))
@@ -333,7 +273,7 @@ class Pipeline:
                 if self.error is not None:
                     continue
                 if not bool(slot.valid):
-                    raise capture_io.HiddenStateError("captured NaN or Inf")
+                    raise HiddenStateError("captured NaN or Inf")
                 futures = [
                     self.pool.submit(self.serialize, cpu, record, i, offsets)
                     for (i, record) in enumerate(records)
@@ -368,7 +308,7 @@ def plan_capture_indices(
     if world < 1 or not 0 <= rank < world:
         raise ValueError("Invalid capture rank topology")
     if assignment == "contiguous":
-        (start, end) = capture_io.contiguous_range(len(lengths), rank, world)
+        (start, end) = contiguous_range(len(lengths), rank, world)
         indices = list(range(start, end))
     elif assignment == "token-balanced":
         bins = [[] for _ in range(world)]
@@ -390,12 +330,13 @@ def plan_capture_indices(
 def run_generation(args, metrics):
     from datasets import load_dataset
     from transformers import AutoTokenizer
-    from legospec.modeling.config_utils import load_text_model_config
-    from legospec.modeling.target.adapters.base import get_model_adapter
+
     from legospec.args import SGLangBackendArgs
     from legospec.data import build_training_dataset
-    from legospec.distributed import init_distributed, destroy_distributed, get_dp_group
+    from legospec.distributed import destroy_distributed, get_dp_group, init_distributed
+    from legospec.modeling.config_utils import load_text_model_config
     from legospec.modeling.target import get_training_target_model
+    from legospec.modeling.target.adapters.base import get_model_adapter
 
     text_config = load_text_model_config(
         args.target_model_path,
@@ -413,7 +354,7 @@ def run_generation(args, metrics):
     root = Path(args.output_path)
     root.mkdir(parents=True, exist_ok=True)
     cpu_group = dist.new_group(backend="gloo")
-    identity = capture_io.input_fingerprint(Path(args.data_path))
+    identity = input_fingerprint(Path(args.data_path))
     try:
         args.final_norm_layer_id = text_config.num_hidden_layers - 1
         requested_layer_ids = args.target_layer_ids or DEFAULT_LAYER_IDS
@@ -448,7 +389,7 @@ def run_generation(args, metrics):
             elif any(root.iterdir()):
                 raise ValueError("Nonempty output directory")
             else:
-                capture_io.atomic_write_json(header_path, header)
+                atomic_write_json(header_path, header)
         dist.barrier()
         tokenizer = AutoTokenizer.from_pretrained(args.target_model_path)
         if tokenizer.pad_token_id is None:
@@ -513,8 +454,8 @@ def run_generation(args, metrics):
         dist.barrier()
         if processed is None:
             processed = build()
-        (start, end) = capture_io.contiguous_range(len(processed), rank, world)
-        from legospec.data.hidden_tar_stream import StreamTarSink
+        (start, end) = contiguous_range(len(processed), rank, world)
+        from legospec.data.hidden_cache import StreamTarSink
 
         sink = StreamTarSink(args, root, identity, rank, metrics)
         if args.recompute_gemma4_final_norm:
@@ -539,7 +480,7 @@ def run_generation(args, metrics):
                 with metrics.time("target_host_total"):
                     output = target.generate_capture_data(records)
             else:
-                batch = capture_io.collate_records(records, tokenizer.pad_token_id)
+                batch = collate_records(records, tokenizer.pad_token_id)
                 with metrics.time("h2d_host"), metrics.gpu("h2d"):
                     gpu = {
                         key: value.cuda(non_blocking=True)
@@ -580,7 +521,7 @@ def run_generation(args, metrics):
             with metrics.time("dataset_read"):
                 row = processed[index]
             if row.get("preprocessing_error"):
-                raise capture_io.HiddenStateError(row["preprocessing_error"])
+                raise HiddenStateError(row["preprocessing_error"])
             record = {
                 key: row[key].reshape(-1)
                 for key in ("input_ids", "attention_mask", "loss_mask")
@@ -627,14 +568,219 @@ def run_generation(args, metrics):
             run_metadata["recompute_gemma4_final_norm"] = True
         if rank == 0:
             print("[rank 0] finalization started", flush=True)
-            from legospec.data.hidden_tar_stream import finalize
+            from legospec.data.hidden_cache import finalize
 
             with metrics.time("finalize"):
                 finalize(root, identity, run_metadata, len(processed), metrics)
-            from legospec.data.capture_metrics import persist_cache
 
             persist_cache(root, metrics)
             print("[rank 0] manifest and data persisted", flush=True)
         dist.barrier(group=cpu_group)
     finally:
         destroy_distributed()
+
+
+BOOT = time.perf_counter()
+
+
+class CaptureMetrics:
+    def __init__(self, profiling=False):
+        self.profiling = profiling
+        self.cpu = defaultdict(float)
+        self.counts = defaultdict(int)
+        self.events = []
+        self.lock = threading.Lock()
+        self.first_batch = None
+        self.last_batch = None
+        self.capture_end = None
+        self.tokens = 0
+        self.padded_tokens = 0
+        self.peak_pinned_bytes = 0
+        self.raw_cpu = []
+
+    @contextmanager
+    def time(self, key):
+        start = time.perf_counter()
+        trace = os.environ.get("OPT_NVTX") == "1"
+        if trace:
+            import torch
+
+            torch.cuda.nvtx.range_push(key)
+        try:
+            yield
+        finally:
+            if trace:
+                torch.cuda.nvtx.range_pop()
+            with self.lock:
+                elapsed = time.perf_counter() - start
+                self.cpu[key] += elapsed
+                self.counts[key] += 1
+                if self.profiling:
+                    self.raw_cpu.append((key, start, elapsed, threading.get_ident()))
+
+    def wrap(self, obj, name, key):
+        original = getattr(obj, name)
+
+        @functools.wraps(original)
+        def wrapped(*args, **kwargs):
+            with self.time(key):
+                return original(*args, **kwargs)
+
+        setattr(obj, name, wrapped)
+
+    @contextmanager
+    def gpu(self, key, stream=None):
+        if not self.profiling:
+            yield
+            return
+        import torch
+
+        enqueued = time.perf_counter()
+        first, last = (
+            torch.cuda.Event(enable_timing=True),
+            torch.cuda.Event(enable_timing=True),
+        )
+        first.record(stream)
+        try:
+            yield
+        finally:
+            last.record(stream)
+            with self.lock:
+                self.events.append((key, first, last, enqueued))
+
+    def batch(self, values):
+        self.batch_counts(
+            int(values["attention_mask"].sum()), values["input_ids"].numel()
+        )
+
+    def batch_counts(self, valid, padded):
+        now = time.perf_counter()
+        if self.first_batch is None:
+            self.first_batch = now
+        self.last_batch = now
+        self.tokens += valid
+        self.padded_tokens += padded
+        self.counts["batches"] += 1
+        if os.environ.get("OPT_PROFILE") == "1":
+            import torch
+
+            if self.counts["batches"] == 2:
+                torch.cuda.cudart().cudaProfilerStart()
+            if self.counts["batches"] == 10:
+                torch.cuda.cudart().cudaProfilerStop()
+
+    def finish(self, directory, extra=None):
+        import torch
+
+        gpu = defaultdict(float)
+        raw_gpu = []
+        for key, first, last, enqueued in self.events:
+            last.synchronize()
+            elapsed = first.elapsed_time(last) / 1000
+            gpu[key] += elapsed
+            raw_gpu.append((key, enqueued, elapsed))
+        value = {
+            "rank": int(os.environ.get("RANK", 0)),
+            "pid": os.getpid(),
+            "wall_s": time.perf_counter() - BOOT,
+            "cpu_stage_s": dict(self.cpu),
+            "stage_calls": dict(self.counts),
+            "cuda_stage_s": dict(gpu),
+            "valid_tokens": self.tokens,
+            "padded_tokens": self.padded_tokens,
+            "first_batch_offset_s": None
+            if self.first_batch is None
+            else self.first_batch - BOOT,
+            "first_batch_monotonic": self.first_batch,
+            "capture_end_monotonic": self.capture_end or self.last_batch,
+            "last_batch_offset_s": None
+            if self.last_batch is None
+            else self.last_batch - BOOT,
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
+            **(extra or {}),
+        }
+        value["peak_pinned_bytes"] = self.peak_pinned_bytes
+        value["host_allocator"] = torch.cuda.memory.host_memory_stats()
+        value["peak_process_rss_bytes"] = (
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        )
+        value["runtime_backend"] = getattr(self, "runtime_backend", {})
+        directory.mkdir(parents=True, exist_ok=True)
+        raw_path = directory / f"rank_{value['rank']}_raw_timings.json"
+        raw_path.write_text(
+            json.dumps(
+                {
+                    "cpu_columns": [
+                        "stage",
+                        "monotonic_start_s",
+                        "elapsed_s",
+                        "thread_id",
+                    ],
+                    "cuda_columns": [
+                        "stage",
+                        "monotonic_enqueue_s",
+                        "cuda_event_elapsed_s",
+                    ],
+                    "cpu": self.raw_cpu,
+                    "cuda": raw_gpu,
+                }
+            )
+            + "\n"
+        )
+        value["raw_timings"] = str(raw_path)
+        (directory / f"rank_{value['rank']}_metrics.json").write_text(
+            json.dumps(value, indent=2) + "\n"
+        )
+
+
+class HiddenStateError(RuntimeError):
+    pass
+
+
+def input_fingerprint(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(path),
+    }
+
+
+def normalize_hidden_states(
+    hidden_states: Any, layer_ids: list[int] | None
+) -> dict[int, Any]:
+    if isinstance(hidden_states, dict):
+        result = {int(key): value for (key, value) in hidden_states.items()}
+    elif isinstance(hidden_states, (tuple, list)):
+        keys = layer_ids if layer_ids is not None else list(range(len(hidden_states)))
+        if len(keys) != len(hidden_states):
+            raise HiddenStateError("hidden-state count does not match target layer IDs")
+        result = dict(zip(keys, hidden_states))
+    else:
+        raise HiddenStateError("target returned an unsupported hidden-state container")
+    if not result:
+        raise HiddenStateError("target returned no hidden states")
+    return result
+
+
+def collate_records(records: list[dict[str, Any]], pad_token_id: int):
+    from torch.nn.utils.rnn import pad_sequence
+
+    def values(key, padding):
+        tensors = [item[key].reshape(-1) for item in records]
+        return pad_sequence(tensors, batch_first=True, padding_value=padding)
+
+    return {
+        "input_ids": values("input_ids", pad_token_id),
+        "attention_mask": values("attention_mask", 0),
+        "loss_mask": values("loss_mask", 0),
+    }
+
+
+def contiguous_range(total: int, rank: int, size: int) -> tuple[int, int]:
+    (base, remainder) = divmod(total, size)
+    start = rank * base + min(rank, remainder)
+    end = start + base + (1 if rank < remainder else 0)
+    return (start, end)

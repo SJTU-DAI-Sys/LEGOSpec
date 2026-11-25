@@ -1,6 +1,6 @@
 import argparse
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 @dataclass
@@ -13,9 +13,6 @@ class SGLangBackendArgs:
     sglang_enable_torch_compile: bool = True
     sglang_enable_dp_attention: bool = False
     sglang_enable_dp_lm_head: bool = False
-    sglang_enable_piecewise_cuda_graph: bool = False
-    sglang_piecewise_cuda_graph_max_tokens: int = 4096
-    sglang_piecewise_cuda_graph_tokens: List[int] = None
     sglang_ep_size: int = 1
     sglang_max_running_requests: int = None  # assign based on batch size
     sglang_max_total_tokens: int = None  # assign based on batch size and seq length
@@ -75,25 +72,6 @@ class SGLangBackendArgs:
             default=False,
         )
         parser.add_argument(
-            "--sglang-enable-piecewise-cuda-graph",
-            action=argparse.BooleanOptionalAction,
-            help="Enable piecewise CUDA graph for SGLang backend's prefill",
-            default=False,
-        )
-        parser.add_argument(
-            "--sglang-piecewise-cuda-graph-max-tokens",
-            type=int,
-            default=4096,
-            help="Set the max tokens for piecewise CUDA graph for SGLang backend",
-        )
-        parser.add_argument(
-            "--sglang-piecewise-cuda-graph-tokens",
-            type=int,
-            nargs="+",
-            default=None,
-            help="Set the list of tokens when using piecewise cuda graph for SGLang backend",
-        )
-        parser.add_argument(
             "--sglang-ep-size",
             type=int,
             default=1,
@@ -123,9 +101,6 @@ class SGLangBackendArgs:
             sglang_enable_torch_compile=args.sglang_enable_torch_compile,
             sglang_enable_dp_attention=args.sglang_enable_dp_attention,
             sglang_enable_dp_lm_head=args.sglang_enable_dp_lm_head,
-            sglang_enable_piecewise_cuda_graph=args.sglang_enable_piecewise_cuda_graph,
-            sglang_piecewise_cuda_graph_max_tokens=args.sglang_piecewise_cuda_graph_max_tokens,
-            sglang_piecewise_cuda_graph_tokens=args.sglang_piecewise_cuda_graph_tokens,
             sglang_ep_size=args.sglang_ep_size,
             sglang_max_running_requests=(
                 args.sglang_max_running_requests
@@ -158,9 +133,6 @@ class SGLangBackendArgs:
             enable_torch_compile=self.sglang_enable_torch_compile,
             enable_dp_attention=self.sglang_enable_dp_attention,
             enable_dp_lm_head=self.sglang_enable_dp_lm_head,
-            enable_piecewise_cuda_graph=self.sglang_enable_piecewise_cuda_graph,
-            piecewise_cuda_graph_max_tokens=self.sglang_piecewise_cuda_graph_max_tokens,
-            piecewise_cuda_graph_tokens=self.sglang_piecewise_cuda_graph_tokens,
             ep_size=self.sglang_ep_size,
             max_running_requests=self.sglang_max_running_requests,
             max_total_tokens=self.sglang_max_total_tokens,

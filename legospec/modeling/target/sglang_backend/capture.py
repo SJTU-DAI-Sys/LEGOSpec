@@ -51,6 +51,7 @@ class NativeCapture:
         options.setdefault("mem_fraction_static", 0.4)
         options.update(
             disable_custom_all_reduce=True,
+            enforce_disable_flashinfer_allreduce_fusion=True,
             disable_cuda_graph=True,
             disable_prefill_cuda_graph=True,
             disable_overlap_schedule=True,
@@ -153,7 +154,8 @@ class NativeCapture:
             )
             try:
                 output = self.runner.forward(forward).logits_output
-                final = teacher["hidden"]
+                # Prefill graph buckets pad the eager LM-head input.
+                final = teacher["hidden"][: offsets[-1]]
             finally:
                 handle.remove()
         finally:

@@ -47,6 +47,7 @@ def native_module():
             self.req_to_token_pool = SimpleNamespace(clear=Mock())
             self.token_to_kv_pool_allocator = SimpleNamespace(clear=Mock())
             self.fail = False
+            self.teacher_padding = 0
             self.alloc_memory_pool = Mock()
             self.init_attention_backends = Mock()
             self.init_cuda_graphs = Mock()
@@ -64,7 +65,9 @@ def native_module():
                 [values + 10 * layer for layer in self.model.capture_ids],
                 -1,
             )
-            self.model.logits_processor(None, values + 100)
+            self.model.logits_processor(
+                None, torch.nn.functional.pad(values + 100, (0, 0, 0, self.teacher_padding))
+            )
             return SimpleNamespace(
                 logits_output=SimpleNamespace(
                     hidden_states=aux,
@@ -163,6 +166,7 @@ def test_native_engine_preserves_initialization_and_request_boundaries(native_mo
     assert engine.runner.model.capture_ids == [1, 3]
     assert args.context_length == 64 and args.max_total_tokens == 128
     assert args.disable_cuda_graph and args.enable_return_hidden_states
+    assert args.enforce_disable_flashinfer_allreduce_fusion
     native_module.initialize.assert_called_once_with(server_args=args, local_rank=0)
     assert native_module.publish.call_args.kwargs["ranks"].world_rank == 1
     assert all(not p.requires_grad for p in engine.runner.model.parameters())
@@ -180,6 +184,18 @@ def test_native_engine_preserves_initialization_and_request_boundaries(native_mo
     assert output.packed_last is output.final_hidden_state
     engine.runner.req_to_token_pool.clear.assert_called_once()
     engine.runner.token_to_kv_pool_allocator.clear.assert_called_once()
+
+
+@pytest.mark.parametrize("padding", [0, 3])
+def test_native_engine_removes_prefill_graph_teacher_padding(native_module, padding):
+    engine = make_engine(native_module)
+    engine.runner.teacher_padding = padding
+    output = engine.generate_capture_data(
+        [dict(source_index=0, input_ids=torch.tensor([1, 2]))]
+    )
+    expected = torch.tensor([101, 103]).float()[:, None].expand(-1, 4)
+    torch.testing.assert_close(output.final_hidden_state, expected)
+    assert output.packed_last.shape[0] == output.token_offsets[-1]
 
 
 def test_native_engine_releases_pools_on_forward_failure(native_module):
@@ -240,8 +256,8 @@ def test_offline_collector_uses_shared_loader_and_distributed_setup(
     import legospec.args as arguments
     import legospec.distributed as distributed
     import legospec.modeling.target as target_api
-    from legospec.data import capture_engine
-    from legospec.data.capture_engine import run_generation
+    from legospec.data import hidden_capture
+    from legospec.data.hidden_capture import run_generation
 
     data = tmp_path / "prompts.json"
     data.write_text("[]")
@@ -274,10 +290,10 @@ def test_offline_collector_uses_shared_loader_and_distributed_setup(
         patch.object(distributed, "init_distributed") as initialize,
         patch.object(distributed, "destroy_distributed") as destroy,
         patch.object(distributed, "get_dp_group", return_value="dp"),
-        patch.object(capture_engine.dist, "get_rank", return_value=0),
-        patch.object(capture_engine.dist, "get_world_size", return_value=1),
-        patch.object(capture_engine.dist, "new_group", return_value="cpu"),
-        patch.object(capture_engine.dist, "barrier"),
+        patch.object(hidden_capture.dist, "get_rank", return_value=0),
+        patch.object(hidden_capture.dist, "get_world_size", return_value=1),
+        patch.object(hidden_capture.dist, "new_group", return_value="cpu"),
+        patch.object(hidden_capture.dist, "barrier"),
         patch.object(AutoTokenizer, "from_pretrained", return_value=tokenizer),
         patch.object(arguments.SGLangBackendArgs, "from_args", return_value=options),
         patch.object(
@@ -305,3 +321,56 @@ def test_offline_collector_uses_shared_loader_and_distributed_setup(
         max_running_requests=2,
         max_total_tokens=126,
     )
+
+
+def test_default_training_backend_keywords_match_pinned_sglang():
+    import argparse
+    import inspect
+    from legospec.args import SGLangBackendArgs
+
+    server = pytest.importorskip("sglang.srt.server_args")
+    parser = argparse.ArgumentParser()
+    SGLangBackendArgs.add_args(parser)
+    options = SGLangBackendArgs.from_args(parser.parse_args([])).to_kwargs()
+    inspect.signature(server.ServerArgs).bind_partial(model_path="fixture", **options)
+def test_training_target_passes_timeout_minutes_as_seconds(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from legospec.training.target import setup
+    args=SimpleNamespace(target_model_path='model',trust_remote_code=False,
+        target_model_backend='sglang',dist_timeout=65,max_length=8192,batch_size=2)
+    monkeypatch.setattr(setup,'load_text_model_config',lambda *a,**k:SimpleNamespace())
+    monkeypatch.setattr(setup.SGLangBackendArgs,'from_args',lambda a:SimpleNamespace(to_kwargs=lambda:dict(max_running_requests=None,max_total_tokens=None)))
+    constructor=Mock();monkeypatch.setattr(setup,'get_training_target_model',constructor)
+    setup.build_target_model(args,[])
+    assert constructor.call_args.kwargs['dist_timeout']==3900
+
+
+def test_native_tp_groups_inherit_server_timeout(monkeypatch):
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from unittest.mock import Mock,patch
+    from legospec.modeling.target.sglang_backend import parallel
+    import legospec.distributed as distributed
+    timeouts=[]
+    state=SimpleNamespace(_WORLD=None,_MODEL_PARALLEL_GROUP_TIMEOUT=None)
+    def coordinator(**kwargs):
+        timeouts.append(state._MODEL_PARALLEL_GROUP_TIMEOUT)
+        return SimpleNamespace()
+    state.GroupCoordinator=coordinator
+    context=SimpleNamespace(override_permanently=Mock())
+    shim={
+        'sglang.srt.distributed':SimpleNamespace(parallel_state=state),
+        'sglang.srt.layers.dp_attention':SimpleNamespace(initialize_dp_attention=Mock()),
+        'sglang.srt.runtime_context':SimpleNamespace(get_parallel=lambda:context),
+    }
+    monkeypatch.setattr(parallel.dist,'is_initialized',lambda:True)
+    monkeypatch.setattr(parallel.dist,'get_world_size',lambda group=None:2 if group else 16)
+    monkeypatch.setattr(parallel.dist,'get_rank',lambda:0)
+    monkeypatch.setattr(parallel.dist,'get_backend',lambda:'nccl')
+    monkeypatch.setattr(parallel.dist,'get_process_group_ranks',lambda group:[0,1])
+    monkeypatch.setattr(distributed,'get_tp_group',lambda:'tp')
+    monkeypatch.setattr(distributed,'get_disaggregated_topology',lambda:None)
+    with patch.dict('sys.modules',shim):
+        parallel.initialize_target_parallel(server_args=SimpleNamespace(tp_size=2,dist_timeout=3900),local_rank=0)
+    assert timeouts==[timedelta(seconds=3900)]*2

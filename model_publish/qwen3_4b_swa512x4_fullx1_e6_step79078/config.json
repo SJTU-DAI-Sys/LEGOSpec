@@ -1,0 +1,164 @@
+{
+  "architectures": [
+    "LegoSpecModel"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "block_size": 8,
+  "bos_token_id": 151643,
+  "composable_config": {
+    "access_configs": {
+      "full": {},
+      "swa": {
+        "window_size": 512
+      }
+    },
+    "attention_configs": {
+      "gqa": {
+        "head_dim": 128,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8
+      }
+    },
+    "backbone": {
+      "layers": [
+        {
+          "attention": {
+            "access": "swa",
+            "family": "dense",
+            "variant": "gqa"
+          },
+          "local_operator": {
+            "group_size": 16,
+            "kernel_size": 2,
+            "type": "grouped_conv"
+          }
+        },
+        {
+          "attention": {
+            "access": "swa",
+            "family": "dense",
+            "variant": "gqa"
+          },
+          "local_operator": {
+            "group_size": 16,
+            "kernel_size": 2,
+            "type": "grouped_conv"
+          }
+        },
+        {
+          "attention": {
+            "access": "swa",
+            "family": "dense",
+            "variant": "gqa"
+          },
+          "local_operator": {
+            "group_size": 16,
+            "kernel_size": 2,
+            "type": "grouped_conv"
+          }
+        },
+        {
+          "attention": {
+            "access": "swa",
+            "family": "dense",
+            "variant": "gqa"
+          },
+          "local_operator": {
+            "group_size": 16,
+            "kernel_size": 2,
+            "type": "grouped_conv"
+          }
+        },
+        {
+          "attention": {
+            "access": "full",
+            "family": "dense",
+            "variant": "gqa"
+          },
+          "local_operator": {
+            "group_size": 16,
+            "kernel_size": 2,
+            "type": "grouped_conv"
+          }
+        }
+      ],
+      "type": "layer_stack"
+    },
+    "context": {
+      "target_layer_ids": [
+        1,
+        9,
+        17,
+        25,
+        33
+      ],
+      "type": "concat_projection"
+    },
+    "mask_token_id": 151669,
+    "objective": {
+      "base": {
+        "type": "soft_ce",
+        "weight": 0.2
+      },
+      "final": {
+        "reduction": "complete_block_mean",
+        "rho": 0.3,
+        "type": "dpal_renyi",
+        "weight": 1.0
+      },
+      "loss_decay_gamma": null,
+      "type": "selector_losses"
+    },
+    "proposal": {
+      "rank": 256,
+      "selector_mode": "full_vocab_residual",
+      "stop_gradient": false,
+      "top_k": 16,
+      "type": "selector"
+    }
+  },
+  "dtype": "bfloat16",
+  "eos_token_id": 151645,
+  "execution_config": {
+    "attention_backend": "flex_attention",
+    "flex_attention_backend": "TRITON",
+    "gdn_backend": "fla"
+  },
+  "head_dim": 128,
+  "hidden_act": "silu",
+  "hidden_size": 2560,
+  "initializer_range": 0.02,
+  "intermediate_size": 9728,
+  "layer_types": [
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention",
+    "full_attention"
+  ],
+  "max_position_embeddings": 40960,
+  "max_window_layers": 36,
+  "model_type": "legospec",
+  "num_attention_heads": 32,
+  "num_hidden_layers": 5,
+  "num_key_value_heads": 8,
+  "num_target_layers": 36,
+  "pad_token_id": null,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": {
+    "rope_theta": 1000000,
+    "rope_type": "default"
+  },
+  "sliding_window": null,
+  "target_attention": {
+    "head_dim": 128,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 8
+  },
+  "tie_word_embeddings": true,
+  "transformers_version": "5.12.1",
+  "use_cache": true,
+  "use_sliding_window": false,
+  "vocab_size": 151936
+}

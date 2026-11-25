@@ -20,15 +20,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import os
 import re
 import warnings
-from typing import Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 import torch
+from datasets import Dataset, load_dataset
+from datasets import Dataset as HFDataset
 from transformers import ImageProcessingMixin, PreTrainedTokenizer
 
-from datasets import Dataset as HFDataset
+from legospec.data.parse import GeneralParser, HarmonyParser, ThinkingParser
+from legospec.data.template import TEMPLATE_REGISTRY, ChatTemplate
 
 try:
     from qwen_vl_utils import process_vision_info
@@ -38,9 +43,6 @@ except ImportError:
     HAS_QWEN_VL_UTILS = False
     process_vision_info = None
 
-
-from legospec.data.parse import GeneralParser, HarmonyParser, ThinkingParser
-from legospec.data.template import TEMPLATE_REGISTRY, ChatTemplate
 
 # define a type called conversation
 Conversation = List[Dict[str, str]]
@@ -472,3 +474,291 @@ def build_training_dataset(
 
     dataset.set_format(type="torch")
     return dataset
+
+
+def _project_jsonl(path, columns, source_identity):
+    # source_identity participates in the generator cache fingerprint. A source
+    # edited in place must not silently reuse an older Arrow dataset.
+    import json
+
+    try:
+        import orjson
+
+        decode = orjson.loads
+    except ImportError:
+        decode = json.loads
+    with open(path, "rb") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            record = decode(line)
+            if not isinstance(record, dict):
+                raise ValueError(f"Expected a JSON object at {path}:{line_number}")
+            missing = set(columns) - record.keys()
+            if missing:
+                raise ValueError(
+                    f"Missing training columns {sorted(missing)} at {path}:{line_number}"
+                )
+            yield {column: record[column] for column in columns}
+
+
+def load_training_json(data_files, *, columns=None, cache_dir=None):
+    """Keep the standard loader unless explicit JSONL projection is requested.
+
+    Projection preserves selected values and source order, including all turns.
+    Auxiliary inputs such as tools can be selected alongside conversations.
+    """
+    if columns is None:
+        if isinstance(data_files, Path):
+            data_files = str(data_files)
+        return load_dataset("json", data_files=data_files)["train"]
+    # HF treats list-valued gen_kwargs as input shards. Column names are one
+    # atomic projection, rather than independent shards to split or iterate.
+    columns = tuple(dict.fromkeys(columns))
+    if not columns:
+        raise ValueError("At least one training data column must be selected")
+    path = Path(data_files).expanduser().resolve(strict=True)
+    stat = path.stat()
+    return Dataset.from_generator(
+        _project_jsonl,
+        gen_kwargs={
+            "path": str(path),
+            "columns": columns,
+            "source_identity": (stat.st_size, stat.st_mtime_ns),
+        },
+        cache_dir=cache_dir,
+    )
+
+
+class DataCollatorWithPadding:
+    """
+    Datacollator that will dynamically pad the inputs for batching.
+    """
+
+    def __init__(
+        self,
+        pad_to_length: Optional[int] = None,
+        *,
+        sp_degree: int = 1,
+        ulysses_degree: int = 1,
+    ):
+        self.sp_degree = sp_degree
+        self.ulysses_degree = ulysses_degree
+        self.pad_to_length = pad_to_length
+
+    def paddingtensor(self, intensors: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Pad to the longest sequence in the batch.
+
+        Args:
+            intensors: (B, n, S)
+            N: the length to pad to, N >= n
+
+        Returns:
+            outtensors: (B, N, S)
+        """
+        B, n, S = intensors.shape
+        padding_tensor = torch.zeros(
+            B, N - n, S, dtype=intensors.dtype, device=intensors.device
+        )
+        outtensors = torch.cat((intensors, padding_tensor), dim=1)
+        return outtensors
+
+    def paddingtensor2D(self, intensors: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Pad 2D tensor to the longest sequence in the batch.
+
+        Args:
+            intensors: (B, n)
+            N: the length to pad to, N >= n
+
+        Returns:
+            outtensors: (B, N)
+        """
+        B, n = intensors.shape
+        padding_tensor = torch.zeros(
+            B, N - n, dtype=intensors.dtype, device=intensors.device
+        )
+        outtensors = torch.cat((intensors, padding_tensor), dim=1)
+        return outtensors
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Collate a batch of features.
+
+        Args:
+            features: A list of features, where each feature is a dictionary containing:
+                - input_ids: torch.Tensor of shape (n,)
+                - attention_mask: torch.Tensor of shape (n,)
+                - loss_mask: torch.Tensor of shape (n,)
+
+        Returns:
+            A dictionary containing:
+                - input_ids: torch.Tensor of shape (B, N)
+                - attention_mask: torch.Tensor of shape (B, N)
+                - loss_mask: torch.Tensor of shape (B, N)
+        """
+        max_length = max(item["input_ids"].shape[1] for item in features)
+        if self.pad_to_length is not None:
+            if max_length > self.pad_to_length:
+                raise ValueError(
+                    f"Batch length {max_length} exceeds fixed padding length "
+                    f"{self.pad_to_length}."
+                )
+            max_length = self.pad_to_length
+
+        # pad for sequence parrel
+        max_length = (
+            (max_length + self.sp_degree - 1) // self.sp_degree
+        ) * self.sp_degree
+        # position max len, ulysses do not need chuck position ids
+        position_max_len = max_length * self.ulysses_degree
+
+        batch_input_ids = torch.cat(
+            [self.paddingtensor2D(item["input_ids"], max_length) for item in features]
+        )
+        batch_attention_mask = torch.cat(
+            [
+                self.paddingtensor2D(item["attention_mask"], max_length)
+                for item in features
+            ]
+        )
+        batch_loss_mask = torch.cat(
+            [self.paddingtensor2D(item["loss_mask"], max_length) for item in features]
+        )
+        if "position_ids" in features[0]:
+            batch_position_ids = torch.cat(
+                [
+                    self.paddingtensor2D(item["position_ids"], position_max_len)
+                    for item in features
+                ]
+            )
+        else:
+            batch_position_ids = None
+        batch = {
+            "input_ids": batch_input_ids,
+            "attention_mask": batch_attention_mask,
+            "loss_mask": batch_loss_mask,
+            "hidden_state": None,
+            "target": None,
+        }
+        if batch_position_ids is not None:
+            batch["position_ids"] = batch_position_ids
+        if all("hidden_state" in item for item in features):
+            assert all("target" in item for item in features), (
+                "target is required when hidden_state is provided"
+            )
+            if self.sp_degree > 1:  # USP mode
+                batch["hidden_state"] = torch.cat(
+                    [item["hidden_state"] for item in features]
+                )
+            else:
+                batch["hidden_state"] = torch.cat(
+                    [
+                        self.paddingtensor(item["hidden_state"], max_length)
+                        for item in features
+                    ]
+                )
+            batch["target"] = torch.cat(
+                [self.paddingtensor(item["target"], max_length) for item in features]
+            )
+        return batch
+
+
+class VlmDataCollatorWithPadding:
+    """
+    Datacollator that will dynamically pad the inputs for batching.
+    """
+
+    def paddingtensor(self, intensors: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Pad to the longest sequence in the batch.
+
+        Args:
+            intensors: (B, n, S)
+            N: the length to pad to, N >= n
+
+        Returns:
+            outtensors: (B, N, S)
+        """
+        B, n, S = intensors.shape
+        padding_tensor = torch.zeros(B, N - n, S, dtype=intensors.dtype)
+        outtensors = torch.cat((intensors, padding_tensor), dim=1)
+        return outtensors
+
+    def paddingtensor2D(self, intensors: torch.Tensor, N: int) -> torch.Tensor:
+        """
+        Pad 2D tensor to the longest sequence in the batch.
+
+        Args:
+            intensors: (B, n)
+            N: the length to pad to, N >= n
+
+        Returns:
+            outtensors: (B, N)
+        """
+        B, n = intensors.shape
+        padding_tensor = torch.zeros(B, N - n, dtype=intensors.dtype)
+        outtensors = torch.cat((intensors, padding_tensor), dim=1)
+        return outtensors
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Collate a batch of features.
+
+        Args:
+            features: A list of features, where each feature is a dictionary containing:
+                - input_ids: torch.Tensor of shape (n,)
+                - attention_mask: torch.Tensor of shape (n,)
+                - loss_mask: torch.Tensor of shape (n,)
+                - pixel_values: torch.Tensor of shape (grid_t * grid_h * grid_w, channel * temporal_patch_size * patch_size * patch_size)
+                - image_grid_thw: torch.Tensor of shape (3,)
+
+        Returns:
+            A dictionary containing:
+                - input_ids: torch.Tensor of shape (B, N)
+                - attention_mask: torch.Tensor of shape (B, N)
+                - loss_mask: torch.Tensor of shape (B, N)
+        """
+        max_length = max(item["input_ids"].shape[1] for item in features)
+        batch_input_ids = torch.cat(
+            [self.paddingtensor2D(item["input_ids"], max_length) for item in features]
+        )
+        batch_attention_mask = torch.cat(
+            [
+                self.paddingtensor2D(item["attention_mask"], max_length)
+                for item in features
+            ]
+        )
+        batch_loss_mask = torch.cat(
+            [self.paddingtensor2D(item["loss_mask"], max_length) for item in features]
+        )
+        batch_pixel_values = torch.cat(
+            [item["pixel_values"] for item in features], dim=0
+        )
+        batch_image_grid_thw = torch.cat(
+            [item["image_grid_thw"] for item in features], dim=0
+        )
+        batch = {
+            "input_ids": batch_input_ids,
+            "attention_mask": batch_attention_mask,
+            "loss_mask": batch_loss_mask,
+            "pixel_values": batch_pixel_values,
+            "image_grid_thw": batch_image_grid_thw,
+            "hidden_state": None,
+            "target": None,
+        }
+        if all("hidden_state" in item for item in features):
+            assert all("target" in item for item in features), (
+                "target is required when hidden_state is provided"
+            )
+            batch["hidden_state"] = torch.cat(
+                [
+                    self.paddingtensor(item["hidden_state"], max_length)
+                    for item in features
+                ]
+            )
+            batch["target"] = torch.cat(
+                [self.paddingtensor(item["target"], max_length) for item in features]
+            )
+        return batch

@@ -125,51 +125,6 @@ def compile_friendly_flex_attention(
     )
 
 
-class WrappedCreateBlockMask:
-    _instance = None
-    _is_create_block_mask_compiled = False
-    _compiled_create_block_mask = None
-
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    @torch.compiler.disable(recursive=False)
-    def __init__(self):
-        if not self._is_create_block_mask_compiled:
-            self._compiled_create_block_mask = torch.compile(create_block_mask)
-            self._is_create_block_mask_compiled = True
-
-    def __call__(self):
-        return self._compiled_create_block_mask
-
-
-def compile_friendly_create_block_mask(
-    mask_mod,
-    B,
-    H,
-    Q_LEN,
-    KV_LEN,
-    device,
-    **kwargs,
-):
-    create_block_mask_compiled = (
-        WrappedCreateBlockMask()()
-        if not is_torchdynamo_compiling()
-        else create_block_mask
-    )
-    return create_block_mask_compiled(
-        mask_mod,
-        B,
-        H,
-        Q_LEN,
-        KV_LEN,
-        device,
-        **kwargs,
-    )
-
-
 def create_flex_block_mask(
     mask_mod,
     *,
@@ -186,44 +141,25 @@ def create_flex_block_mask(
     # Validate the backend and apply the FLASH compatibility patch through the
     # same path used to construct attention kernel options.
     flex_kernel_options(backend)
-    if backend == "FLASH":
-        return create_block_mask(
-            mask_mod,
-            B=B,
-            H=H,
-            Q_LEN=Q_LEN,
-            KV_LEN=KV_LEN,
-            device=device,
-            BLOCK_SIZE=(FLASH_Q_TILE, FLASH_KV_TILE),
-        )
-    if Q_LEN <= TRITON_MASK_TILE or KV_LEN <= TRITON_MASK_TILE:
-        # PyTorch 2.9.1's auto-dynamic compilation can generate invalid sparse
-        # counts when a shape transition leaves only one Q or KV tile. These
-        # small masks are cheap to build eagerly; keep larger masks compiled.
-        return create_block_mask(
-            mask_mod,
-            B=B,
-            H=H,
-            Q_LEN=Q_LEN,
-            KV_LEN=KV_LEN,
-            device=device,
-            BLOCK_SIZE=TRITON_MASK_TILE,
-        )
-    return compile_friendly_create_block_mask(
+    # Torch 2.13 Inductor cannot lower data-dependent sparse block counts for
+    # packed masks. Build BlockMask eagerly; attention kernels stay compiled.
+    block_size = (
+        (FLASH_Q_TILE, FLASH_KV_TILE) if backend == "FLASH" else TRITON_MASK_TILE
+    )
+    return create_block_mask(
         mask_mod,
         B=B,
         H=H,
         Q_LEN=Q_LEN,
         KV_LEN=KV_LEN,
         device=device,
-        BLOCK_SIZE=TRITON_MASK_TILE,
+        BLOCK_SIZE=block_size,
     )
 
 
 __all__ = [
     "FLASH_KV_TILE",
     "FLASH_Q_TILE",
-    "compile_friendly_create_block_mask",
     "compile_friendly_flex_attention",
     "create_flex_block_mask",
     "flex_kernel_options",

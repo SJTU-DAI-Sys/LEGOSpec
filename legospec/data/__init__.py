@@ -1,23 +1,18 @@
-from legospec.data.hidden_cache import (
-    HiddenCacheError,
+"""Conversation datasets and offline hidden-feature caches."""
+
+from legospec.data.dataset import build_training_dataset
+from legospec.data.hidden_cache import HiddenCacheError, load_hidden_cache_manifest
+from legospec.data.hidden_dataset import (
     RegenFullCollator,
     RegenFullDataset,
-    ShardAwareDistributedSampler,
-    load_hidden_cache_manifest,
     sample_metadata_has_valid_anchor,
 )
-from legospec.data.preprocessing import (
-    build_training_dataset,
-)
-from legospec.data.utils import prepare_dp_dataloaders
 
 __all__ = [
+    "build_training_dataset",
     "HiddenCacheError",
+    "load_hidden_cache_manifest",
     "RegenFullCollator",
     "RegenFullDataset",
-    "ShardAwareDistributedSampler",
-    "build_training_dataset",
-    "load_hidden_cache_manifest",
-    "prepare_dp_dataloaders",
     "sample_metadata_has_valid_anchor",
 ]

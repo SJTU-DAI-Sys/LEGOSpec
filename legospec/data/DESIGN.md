@@ -1,31 +1,36 @@
 # Data
 
-负责原始对话预处理、目标隐藏态离线采集，以及训练缓存的读写和审计。
-本目录当前不再分子目录；模型执行交给 modeling/target，训练批次规划交给 training/data。
+This package prepares conversations, captures target hidden states, and reads and writes feature caches. It contains six implementation modules and one public entrypoint.
 
-## 对话与训练数据
+## Conversation datasets
 
-- template.py：聊天模板及注册，定义消息如何转换为模型输入。
-- parse.py：通用、Harmony、Thinking 等对话解析。
-- preprocessing.py：文本/视觉对话 tokenization、loss mask 和训练数据集构建。
-- json_training.py：流式读取并投影 JSONL 字段，构建训练用 Dataset。
-- utils.py：padding collator、视觉数据 collator、DP dataloader 和 Harmony 内容处理。
-- __init__.py：对外导出数据接口。
+- `template.py`: chat-template definitions and registration.
+- `parse.py`: General, Harmony, and Thinking parsers.
+- `dataset.py`: JSONL field projection, text/vision preprocessing, tokenization, loss masks, HF Dataset construction, and text/vision collators.
+- `__init__.py`: public dataset and hidden-cache interfaces.
 
-## 隐藏态采集
+Collators receive sequence-parallel dimensions explicitly. Training samplers and DataLoader construction belong to `training/data/loader.py`.
 
-- capture_io.py：采集 CLI、层号解析、记录整理、输入标识和原子 JSON 写入。
-- capture_engine.py：构造采集任务，调用统一 target 入口；以可复用 pinned buffer 和异步 pipeline 完成 GPU→CPU 传输及写入调度。
-- capture_metrics.py：采集耗时、吞吐、显存统计和缓存落盘操作。
+## Hidden capture
 
-采集器提出层号、上下文和批量容量需求；HF/SGLang 执行、模型缩放及 final norm 语义由 modeling/target 负责。
+`hidden_capture.py` owns task assignment, batch preparation, target calls, reusable pinned buffers, asynchronous GPU-to-CPU transfer, bounded writer scheduling, and capture metrics.
 
-## Raw-tar 缓存
+The CLI is parsed in `scripts/data/capture_hidden_states.py`. Target execution, model scaling, and final normalization remain in `modeling/target`.
 
-- hidden_tar_raw.py：单条样本的张量编码和解码。
-- hidden_tar_stream.py：流式 tar 写入、SHA256、异步持久化提交和最终 manifest。
-- hidden_cache.py：manifest/样本读取与检查、训练 Dataset、shard sampler 和 collator；需要重建 final norm 时调用模型 adapter。
-- hidden_audit.py：缓存身份、shard 校验及审计报告。
+## Hidden cache
 
-缓存保存指定层的原始 decoder 输出，final norm 后的 teacher 特征单独表示。
-读写统一使用当前 raw-tar 格式；采集、传输和存储不实现模型专属计算。
+`hidden_cache.py` owns RawSample encoding and selective decoding, streaming tar writes and checksums, shard recovery, asynchronous durable commits, manifest publication and validation, sample-index validation, cache errors, atomic JSON writes, and persistence operations.
+
+Atomic JSON replacement and durable commits retain their distinct synchronization behavior. Storage does not import capture orchestration or dataset readers.
+
+## Hidden dataset
+
+`hidden_dataset.py` provides RegenFullDataset, selective reads, bounded open-file lifetime, cached sample metadata, RegenFullCollator, metadata-based anchor eligibility, complete finite-value audits, and audit-receipt validation with spawned CPU workers.
+
+Audit and normal reading share the same reader. Optional final-norm reconstruction calls the target adapter.
+
+## Dependency flow
+
+Conversation loading follows `dataset → parse → template`. Capture consumes datasets, target interfaces, and hidden-cache storage. Hidden datasets consume storage; storage does not import either consumer.
+
+Caches store raw decoder features separately from normalized teacher features. Raw-tar bytes, tensor ownership, commit ordering, and sample ordering are preserved across module organization changes.

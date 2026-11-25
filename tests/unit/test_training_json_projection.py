@@ -1,10 +1,9 @@
 import json
-
 import tempfile
 import unittest
 from pathlib import Path
 
-from legospec.data.json_training import load_training_json
+from legospec.data.dataset import load_training_json
 
 
 def write_records(path, records):

@@ -27,6 +27,7 @@ def build_target_model(args, draft_models):
     backend_kwargs = {}
     if args.target_model_backend == "sglang":
         backend_kwargs = SGLangBackendArgs.from_args(args).to_kwargs()
+        backend_kwargs["dist_timeout"] = int(args.dist_timeout) * 60
         backend_kwargs["context_length"] = (
             backend_kwargs.get("context_length") or args.max_length + 1
         )

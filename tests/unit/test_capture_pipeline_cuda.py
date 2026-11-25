@@ -1,14 +1,14 @@
 """Packed and tensor D2H paths preserve features across pinned-slot reuse."""
 
-from contextlib import nullcontext
 import io
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from legospec.data.capture_engine import Pipeline
-from legospec.data.hidden_tar_raw import load_raw
+from legospec.data.hidden_cache import load_raw
+from legospec.data.hidden_capture import Pipeline
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA transfer pipeline")

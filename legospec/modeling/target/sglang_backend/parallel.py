@@ -52,6 +52,14 @@ def initialize_target_parallel(*, server_args, local_rank):
         use_npu_communicator=False,
     )
     if topology is None:
+        # Native capture skips SGLang distributed bootstrap because WORLD exists.
+        # Carry its configured timeout into the TP groups instead of NCCL defaults.
+        if server_args.dist_timeout is not None:
+            from datetime import timedelta
+
+            parallel_state._MODEL_PARALLEL_GROUP_TIMEOUT = timedelta(
+                seconds=server_args.dist_timeout
+            )
         coordinator = parallel_state.GroupCoordinator(
             group_ranks=[
                 list(range(start, start + tp_size))

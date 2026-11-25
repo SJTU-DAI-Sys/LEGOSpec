@@ -1,21 +1,27 @@
 """Raw-tar durable commits, recovery and cache contract."""
 
-from contextlib import nullcontext
 import hashlib
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from legospec.data.capture_engine import metadata
 from legospec.data.hidden_cache import (
     HiddenCacheError,
-    RegenFullDataset,
+    RawSample,
+    StreamTar,
+    StreamTarSink,
+    finalize,
     load_hidden_cache_manifest,
 )
-from legospec.data.hidden_tar_raw import RawSample
-from legospec.data.hidden_tar_stream import StreamTar, StreamTarSink, finalize
+from legospec.data.hidden_capture import metadata
+from legospec.data.hidden_dataset import (
+    RegenFullDataset,
+    audit_hidden_cache,
+    validate_audit,
+)
 
 
 class Metrics:
@@ -45,7 +51,8 @@ def sample(index):
     )
 
 
-def test_stream_commit_resume_and_manifest_roundtrip(tmp_path):
+@pytest.mark.parametrize("audit_workers", [1, 2])
+def test_stream_commit_resume_and_manifest_roundtrip(tmp_path, audit_workers):
     identity = {"source": "fixture"}
     sink = StreamTarSink(args(), tmp_path, identity, 0, Metrics())
     for index in range(3):
@@ -99,6 +106,28 @@ def test_stream_commit_resume_and_manifest_roundtrip(tmp_path):
             )
     finally:
         dataset.close()
+
+    receipt = tmp_path / "audit.json"
+    audit_hidden_cache(tmp_path, receipt, workers=audit_workers)
+    audited = RegenFullDataset(
+        tmp_path,
+        checked,
+        required_layer_ids={0},
+        max_length=2,
+        validation_mode="audited",
+        audit_path=receipt,
+    )
+    try:
+        torch.testing.assert_close(
+            audited[3]["hidden_states"][0], sample(3)["hidden_states"][0][:2]
+        )
+    finally:
+        audited.close()
+    shard_path = tmp_path / manifest["shards"][0]["path"]
+    with shard_path.open("ab") as stream:
+        stream.write(b"changed")
+    with pytest.raises(ValueError, match="changed"):
+        validate_audit(tmp_path, manifest, receipt, {0})
 
 
 def test_async_commit_errors_reach_finish(tmp_path, monkeypatch):

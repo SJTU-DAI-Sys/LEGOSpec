@@ -427,3 +427,48 @@ def test_draft_attention_geometry_independent_of_target(variant, kv_heads, tmp_p
     c.composable_config["attention_configs"][variant]["num_key_value_heads"] = 7
     with pytest.raises(ValueError, match="KV dividing Q"):
         c.validate_recipe()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("window", [None, 2048])
+def test_packed_long_flex_mask_matches_dense_outputs_and_gradients(window):
+    from types import SimpleNamespace
+    from torch.nn import functional as F
+    from legospec.modeling.draft.backbone.attention.access.visibility import (
+        indexed_visibility, build_visibility,
+    )
+    from legospec.modeling.draft.backbone.attention.backends.flex import (
+        create_flex_block_mask, compile_friendly_flex_attention, flex_kernel_options,
+    )
+
+    torch.manual_seed(42)
+    inputs = SimpleNamespace(
+        anchor_positions=torch.linspace(2048, 8191, 512, device="cuda").long()[None],
+        block_keep_mask=torch.ones(1, 512, device="cuda", dtype=torch.bool),
+        anchor_document_ids=None,
+    )
+    positions = torch.arange(8192, device="cuda")[None]
+    valid = torch.ones_like(positions, dtype=torch.bool)
+    documents = torch.zeros_like(positions)
+    mask_mod, _ = indexed_visibility(inputs, positions, valid, documents, 4096, window)
+    block_mask = create_flex_block_mask(
+        mask_mod, B=1, H=None, Q_LEN=4096, KV_LEN=12288,
+        device="cuda", backend="TRITON",
+    )
+    q = torch.randn(1, 32, 4096, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(1, 8, 12288, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    selected = torch.tensor([0, 7, 8, 255, 511, 1023, 2047, 3071, 4095], device="cuda")
+    actual = compile_friendly_flex_attention(
+        q, k, v, block_mask=block_mask, enable_gqa=True,
+        kernel_options=flex_kernel_options("TRITON"),
+    )[:, :, selected]
+    visibility = build_visibility(inputs, positions, valid, documents, 4096, window)
+    expected = F.scaled_dot_product_attention(
+        q[:, :, selected], k.repeat_interleave(4, 1), v.repeat_interleave(4, 1),
+        attn_mask=visibility[:, :, selected],
+    )
+    torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+    actual_grad = torch.autograd.grad(actual.float().square().mean(), q)[0]
+    expected_grad = torch.autograd.grad(expected.float().square().mean(), q)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0.04, atol=2e-5)

@@ -196,6 +196,7 @@ def test_native_capture_ids_are_supplied_before_loading_the_teacher():
         target_model_path="fixture",
         trust_remote_code=False,
         target_model_backend="sglang",
+        dist_timeout=60,
         tp_size=1,
         disaggregate=False,
         batch_size=1,

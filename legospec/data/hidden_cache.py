@@ -1,31 +1,462 @@
-"""Reader and batching utilities for versioned ``regen_full`` tar caches."""
+"""Hidden-cache format, manifests, streaming writes and durable commits."""
 
 from __future__ import annotations
+
 import hashlib
 import json
 import math
-import random
-from collections import OrderedDict
+import os
+import struct
+import tarfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-import torch
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Dataset, Sampler
 
+import torch
+
+MAGIC = b"LGRAW001"
+DTYPES = {
+    str(t): t
+    for t in (
+        torch.bfloat16,
+        torch.float16,
+        torch.float32,
+        torch.float64,
+        torch.int64,
+        torch.int32,
+        torch.int16,
+        torch.int8,
+        torch.uint8,
+        torch.bool,
+    )
+}
+
+
+class RawSample:
+    def __init__(self, payload):
+        self.parts = []
+        descriptors = []
+        offset = 0
+        fields = [
+            (key, payload[key]) for key in ("input_ids", "attention_mask", "loss_mask")
+        ]
+        fields += [
+            (f"hidden/{int(key)}", value)
+            for key, value in sorted(payload["hidden_states"].items())
+        ]
+        if "final_hidden_state" in payload:
+            fields += [("final_hidden_state", payload["final_hidden_state"])]
+        for name, tensor in fields:
+            if tensor.device.type != "cpu" or str(tensor.dtype) not in DTYPES:
+                raise ValueError("Raw tar requires a supported CPU tensor")
+            tensor = tensor.detach().contiguous()
+            value = memoryview(tensor.view(torch.uint8).numpy()).cast("B")
+            descriptors.append(
+                {
+                    "name": name,
+                    "dtype": str(tensor.dtype),
+                    "shape": list(tensor.shape),
+                    "offset": offset,
+                    "nbytes": len(value),
+                }
+            )
+            self.parts.append(value)
+            offset += len(value)
+        header = json.dumps(
+            {
+                "version": 1,
+                "sample_index": payload["sample_index"],
+                "tensors": descriptors,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.header = MAGIC + struct.pack("<Q", len(header)) + header
+        self.header += b"\0" * (-len(self.header) % 64)
+        self.size = len(self.header) + offset
+
+
+def load_raw(
+    handle,
+    start,
+    size,
+    *,
+    headers_only=False,
+    expect_final_hidden=True,
+    layer_ids=None,
+    max_length=None,
+):
+    """Validate every descriptor, optionally read selected layers/token prefixes."""
+    if max_length is not None and max_length <= 0:
+        raise ValueError("max_length must be positive")
+    layer_ids = None if layer_ids is None else set(layer_ids)
+    handle.seek(start)
+    prefix = handle.read(16)
+    if len(prefix) != 16 or prefix[:8] != MAGIC:
+        raise ValueError("Invalid raw tensor member magic")
+    length = struct.unpack("<Q", prefix[8:])[0]
+    if not 0 < length <= min(1024 * 1024, size - 16):
+        raise ValueError("Invalid raw tensor header length")
+    info = json.loads(handle.read(length))
+    if info.get("version") != 1:
+        raise ValueError("Unsupported raw tensor member version")
+    data_start = (16 + length + 63) // 64 * 64
+    output = {
+        "schema_version": 2,
+        "sample_index": info["sample_index"],
+        "hidden_states": {},
+    }
+    names = set()
+    previous_end = 0
+    for desc in info["tensors"]:
+        name, dtype, shape = desc["name"], DTYPES[desc["dtype"]], desc["shape"]
+        if name in names or any(type(n) is not int or n <= 0 for n in shape):
+            raise ValueError("Invalid raw tensor shape or duplicate field")
+        names.add(name)
+        offset, nbytes = desc["offset"], desc["nbytes"]
+        expected = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+        if (
+            type(offset) is not int
+            or type(nbytes) is not int
+            or offset != previous_end
+            or nbytes != expected
+            or data_start + offset + nbytes > size
+        ):
+            raise ValueError("Invalid raw tensor byte range")
+        previous_end = offset + nbytes
+        layer = None
+        if name.startswith("hidden/"):
+            layer = name.removeprefix("hidden/")
+            if not layer.isascii() or not layer.isdecimal() or str(int(layer)) != layer:
+                raise ValueError("Invalid raw hidden layer ID")
+            layer = int(layer)
+        elif name not in (
+            "input_ids",
+            "attention_mask",
+            "loss_mask",
+            "final_hidden_state",
+        ):
+            raise ValueError("Unknown raw tensor field")
+        if layer is not None and layer_ids is not None and layer not in layer_ids:
+            continue
+        read_shape = list(shape)
+        if max_length is not None:
+            read_shape[0] = min(read_shape[0], max_length)
+        read_bytes = nbytes // shape[0] * read_shape[0]
+        if headers_only and (layer is not None or name == "final_hidden_state"):
+            value = torch.empty(read_shape, dtype=dtype, device="meta")
+        else:
+            handle.seek(start + data_start + offset)
+            data = bytearray(read_bytes)
+            if handle.readinto(data) != read_bytes:
+                raise ValueError("Truncated raw tensor")
+            value = torch.frombuffer(data, dtype=dtype).reshape(read_shape)
+        if layer is not None:
+            output["hidden_states"][layer] = value
+        elif name in ("input_ids", "attention_mask", "loss_mask", "final_hidden_state"):
+            output[name] = value
+        else:
+            raise ValueError("Unknown raw tensor field")
+    required = {"input_ids", "attention_mask", "loss_mask"}
+    if (
+        not required.issubset(names)
+        or ("final_hidden_state" in names) != expect_final_hidden
+    ):
+        raise ValueError("Raw tensor fields do not match the cache layout")
+    if data_start + previous_end != size:
+        raise ValueError("Trailing raw tensor bytes")
+    return output
+
+
+def sync_dir(path, metrics):
+    with metrics.time("commit_directory_fsync"):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def durable_json(path, value, metrics):
+    temporary = path.with_name("." + path.name + ".tmp")
+    with metrics.time("commit_index_encode"):
+        encoded = json.dumps(value, sort_keys=True).encode() + b"\n"
+    with metrics.time("commit_index_write"):
+        with temporary.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            with metrics.time("commit_index_fsync"):
+                os.fsync(handle.fileno())
+    with metrics.time("commit_index_rename"):
+        os.replace(temporary, path)
+    sync_dir(path.parent, metrics)
+
+
+class StreamTar:
+    def __init__(self, root, rank, sequence, args, metrics):
+        (self.metrics, self.args) = (metrics, args)
+        self.final = root / "shards" / f"rank_{rank:05d}_part_{sequence:08d}.tar"
+        self.temp = self.final.with_name("." + self.final.name + ".tmp")
+        self.handle = self.temp.open("wb", buffering=args.tar_buffer_bytes)
+        self.digest = hashlib.sha256()
+        self.offset = 0
+        (self.indices, self.metadata, self.names, self.ranges) = ([], [], [], [])
+
+    def write(self, value):
+        value = memoryview(value).cast("B")
+        for begin in range(0, len(value), self.args.tar_buffer_bytes):
+            part = value[begin : begin + self.args.tar_buffer_bytes]
+            with self.metrics.time("tar_write_bytes"):
+                count = self.handle.write(part)
+            if count != len(part):
+                raise OSError("Short tar write")
+            with self.metrics.time("sha256_stream"):
+                self.digest.update(part)
+            self.offset += count
+
+    def member(self, name, value):
+        size = value.size if isinstance(value, RawSample) else len(value)
+        header = tarfile.TarInfo(name)
+        (header.size, header.mtime) = (size, 0)
+        self.write(header.tobuf(format=tarfile.USTAR_FORMAT))
+        start = self.offset
+        if isinstance(value, RawSample):
+            self.write(value.header)
+            for part in value.parts:
+                self.write(part)
+        else:
+            self.write(value)
+        self.write(b"\x00" * (-size % 512))
+        return [start, size]
+
+    def seal(self, meta):
+        with self.metrics.time("commit_tar_footer"):
+            self.member(METADATA_MEMBER, json.dumps(meta, sort_keys=True).encode())
+            self.write(b"\x00" * 1024)
+            self.write(b"\x00" * (-self.offset % 10240))
+
+    def publish(self, meta, sidecar):
+        try:
+            with self.metrics.time("shard_commit"):
+                with self.metrics.time("commit_flush"):
+                    self.handle.flush()
+                with self.metrics.time("commit_file_fsync"):
+                    os.fsync(self.handle.fileno())
+                with self.metrics.time("commit_close"):
+                    self.handle.close()
+                meta["sha256"] = self.digest.hexdigest()
+                with self.metrics.time("commit_data_rename"):
+                    os.replace(self.temp, self.final)
+                sync_dir(self.final.parent, self.metrics)
+                durable_json(sidecar, meta, self.metrics)
+            return meta
+        finally:
+            self.handle.close()
+
+
+class StreamTarSink:
+    def __init__(self, args, root, identity, rank, metrics):
+        (self.args, self.root, self.identity, self.rank, self.metrics) = (
+            args,
+            Path(root),
+            identity,
+            rank,
+            metrics,
+        )
+        self.directory = self.root / "ranks" / f"rank_{rank:05d}"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.root / "shards").mkdir(exist_ok=True)
+        for path in (
+            self.directory,
+            self.directory.parent,
+            self.root / "shards",
+            self.root,
+        ):
+            sync_dir(path, metrics)
+        self.done = set()
+        self.sequence = 0
+        for path in sorted(self.directory.glob("part_*.json")):
+            meta = json.loads(path.read_text())
+            if not args.resume or meta["input_identity"] != identity:
+                raise ValueError("Committed tar identity mismatch")
+            if sha256_file(self.root / meta["path"]) != meta["sha256"]:
+                raise ValueError("Committed tar checksum mismatch")
+            if self.done.intersection(meta["source_indices"]):
+                raise ValueError("Duplicate committed source ID")
+            self.done.update(meta["source_indices"])
+            self.sequence = max(self.sequence, meta["sequence"] + 1)
+        if args.resume:
+            for path in (self.root / "shards").glob(f".rank_{rank:05d}_part_*.tar.tmp"):
+                path.unlink()
+        self.seen = set(self.done)
+        self.writer = None
+        self.pending = deque()
+        self.executor = ThreadPoolExecutor(max_workers=args.tar_commit_workers)
+
+    def reap(self, wait=False):
+        for future in self.pending:
+            if future.done():
+                future.result()
+        while self.pending and (wait or self.pending[0].done()):
+            self.done.update(self.pending.popleft().result()["source_indices"])
+            if not wait:
+                continue
+
+    def add(self, index, value, metadata):
+        self.reap()
+        if index in self.seen:
+            raise ValueError("Duplicate source ID")
+        size = value.size if isinstance(value, RawSample) else len(value)
+        if (
+            self.writer is not None
+            and self.writer.offset + 512 + size > self.args.tar_shard_bytes
+        ):
+            self.commit()
+        if self.writer is None:
+            self.writer = StreamTar(
+                self.root, self.rank, self.sequence, self.args, self.metrics
+            )
+        extension = "bin"
+        name = f"samples/{index:012d}.{extension}"
+        with self.metrics.time("tar_write"):
+            span = self.writer.member(name, value)
+        self.writer.indices.append(index)
+        self.writer.metadata.append(metadata)
+        self.writer.names.append(name)
+        self.writer.ranges.append(span)
+        self.seen.add(index)
+
+    def commit(self):
+        writer = self.writer
+        if writer is None:
+            return
+        meta = {
+            "schema_version": 2,
+            "kind": "final_rank",
+            "rank": self.rank,
+            "sequence": self.sequence,
+            "input_identity": self.identity,
+            "path": str(writer.final.relative_to(self.root)),
+            "sample_count": len(writer.indices),
+            "source_indices": writer.indices,
+            "sample_metadata": writer.metadata,
+            "member_names": writer.names,
+            "member_ranges": writer.ranges,
+        }
+        writer.seal(meta)
+        sidecar = self.directory / f"part_{self.sequence:08d}.json"
+        self.writer = None
+        self.sequence += 1
+        if self.executor:
+            try:
+                with self.metrics.time("commit_queue_wait"):
+                    while len(self.pending) >= self.args.tar_pending_commits:
+                        self.done.update(
+                            self.pending.popleft().result()["source_indices"]
+                        )
+                    self.reap()
+                self.pending.append(self.executor.submit(writer.publish, meta, sidecar))
+            except BaseException:
+                writer.handle.close()
+                raise
+        else:
+            self.done.update(writer.publish(meta, sidecar)["source_indices"])
+
+    def finish(self):
+        try:
+            self.commit()
+            with self.metrics.time("commit_drain"):
+                self.reap(wait=True)
+        finally:
+            if self.executor:
+                self.executor.shutdown(wait=True)
+
+
+def finalize(root, identity, metadata, count, metrics):
+    root = Path(root)
+    (shards, indices, ordinal) = ([], [], 0)
+    with metrics.time("final_index_read"):
+        for path in sorted((root / "ranks").glob("rank_*/part_*.json")):
+            shard = json.loads(path.read_text())
+            assert (
+                shard["input_identity"] == identity and (root / shard["path"]).is_file()
+            )
+            size = shard["sample_count"]
+            assert (
+                size
+                == len(shard["source_indices"])
+                == len(shard["member_names"])
+                == len(shard["member_ranges"])
+            )
+            (shard["success_start"], shard["success_end"]) = (
+                ordinal,
+                ordinal + size - 1,
+            )
+            ordinal += size
+            indices.extend(shard["source_indices"])
+            shards.append(shard)
+    assert len(indices) == count and sorted(indices) == list(range(count)), (
+        "Incomplete or duplicate source coverage"
+    )
+    manifest = {
+        **metadata,
+        "schema_version": 2,
+        "cache_format": "tar-raw-v1",
+        "logical_order": "source_index",
+        "complete": True,
+        "input_identity": identity,
+        "successful_samples": count,
+        "failed_samples": 0,
+        "shard_size": None,
+        "shards": shards,
+    }
+    durable_json(root / "manifest.json", manifest, metrics)
+    return manifest
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def persist_cache(root, metrics):
+    with metrics.time("fsync"):
+        for path in root.rglob("*"):
+            if path.is_file() and not path.name.endswith(".tmp"):
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+        for directory in [root / "shards", root]:
+            if directory.exists():
+                fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+
+METADATA_MEMBER = "_metadata.json"
 REGEN_FULL_SCHEMA_VERSION = 2
 SAMPLE_INDEX_VERSION = 1
 
 
 class HiddenCacheError(ValueError):
     """Raised when a regen_full cache cannot safely be used for training."""
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _same_model(expected: str, actual: str) -> bool:
@@ -63,7 +494,7 @@ def load_hidden_cache_manifest(
         raise HiddenCacheError("regen_full cache is not marked complete")
     if manifest.get("sample_index_version") != SAMPLE_INDEX_VERSION:
         raise HiddenCacheError(
-            "regen_full cache has no lightweight sample index; regenerate the cache with the current prepare_hidden_states.py"
+            "regen_full cache has no lightweight sample index; regenerate the cache with the current capture_hidden_states.py"
         )
     if not _same_model(target_model, str(manifest.get("target_model", ""))):
         raise HiddenCacheError(
@@ -146,7 +577,7 @@ def load_hidden_cache_manifest(
             ):
                 raise HiddenCacheError(f"invalid indexed tar byte range: {path}")
             previous_end = offset + size
-        if verify_checksums and _sha256(path) != shard.get("sha256"):
+        if verify_checksums and sha256_file(path) != shard.get("sha256"):
             raise HiddenCacheError(f"regen_full shard checksum mismatch: {path}")
         expected_start = end + 1
         counted += count
@@ -189,386 +620,3 @@ def _validate_sample_metadata(value: Any, path: Path | None = None) -> None:
         previous_end = end
     if observed_count != count:
         raise HiddenCacheError(f"indexed supervision count mismatch{location}")
-
-
-def sample_metadata_has_valid_anchor(
-    metadata: dict[str, Any],
-    *,
-    block_size: int,
-    max_length: int,
-    complete_blocks: bool = False,
-) -> bool:
-    """Evaluate anchor eligibility using only the lightweight cache index."""
-    _validate_sample_metadata(metadata)
-    block_size = int(block_size)
-    effective_length = min(int(metadata["sequence_length"]), int(max_length))
-    if effective_length < block_size:
-        return False
-    runs = metadata["loss_mask_runs"]
-    supervised_count = sum(
-        (
-            max(0, min(end, effective_length) - start)
-            for (start, end) in runs
-            if start < effective_length
-        )
-    )
-    if supervised_count < 2 * block_size:
-        return False
-    if complete_blocks:
-        return any(
-            (
-                min(end, effective_length) - start >= block_size
-                for (start, end) in runs
-                if start < effective_length
-            )
-        )
-    max_anchor = effective_length - block_size
-    return any(
-        (
-            start <= max_anchor and min(end, effective_length) - start >= 2
-            for (start, end) in runs
-            if start < effective_length
-        )
-    )
-
-
-class RegenFullDataset(Dataset):
-    """Map-style dataset backed by regen_full tar members."""
-
-    def __init__(
-        self,
-        root: str | Path,
-        manifest: dict[str, Any],
-        *,
-        required_layer_ids: set[int],
-        max_length: int,
-        max_open_archives: int = 4,
-        validation_mode: str = "per-read",
-        audit_path: str | Path | None = None,
-        selective_read: bool = True,
-    ) -> None:
-        self.root = Path(root)
-        self.manifest = manifest
-        self.required_layer_ids = set(required_layer_ids)
-        self.final_layer_id = int(manifest["final_norm_layer_id"])
-        self.hidden_size = int(manifest["hidden_size"])
-        self._final_norm = None
-        if manifest.get("recompute_gemma4_final_norm"):
-            if (
-                manifest.get("context_feature_contract")
-                != "decoder_outputs_pre_final_norm_v1"
-            ):
-                raise HiddenCacheError(
-                    "Unsupported Gemma 4 final norm recomputation layout"
-                )
-            from legospec.modeling.config_utils import get_pretrained_config_dict
-            from legospec.modeling.target.adapters.base import get_model_adapter
-
-            adapter = get_model_adapter(
-                get_pretrained_config_dict(manifest["target_model"])
-            )
-            config = adapter.config
-            if (
-                config.hidden_size != self.hidden_size
-                or config.num_hidden_layers != self.final_layer_id + 1
-            ):
-                raise HiddenCacheError(
-                    "Target checkpoint does not match cached feature dimensions"
-                )
-            self._final_norm = adapter.load_final_norm(manifest["target_model"])
-        self.max_length = int(max_length)
-        if validation_mode not in ("per-read", "audited"):
-            raise ValueError("Unknown hidden-cache validation mode")
-        self.validate_finite = validation_mode == "per-read"
-        self.selective_read = bool(selective_read)
-        if not self.validate_finite:
-            from legospec.data.hidden_audit import validate_audit
-
-            validate_audit(
-                self.root,
-                manifest,
-                audit_path,
-                self.required_layer_ids | {self.final_layer_id},
-            )
-        self.max_open_archives = max(1, int(max_open_archives))
-        self.entries: list[tuple[Path, str, int, dict[str, Any]]] = []
-        self._member_ranges = {}
-        for shard in manifest["shards"]:
-            path = self.root / shard["path"]
-            start = int(shard["success_start"])
-            for offset, (source_index, sample_metadata) in enumerate(
-                zip(shard["source_indices"], shard["sample_metadata"])
-            ):
-                ordinal = start + offset
-                self.entries.append(
-                    (
-                        path,
-                        shard["member_names"][offset],
-                        int(source_index),
-                        sample_metadata,
-                    )
-                )
-            for name, span in zip(shard["member_names"], shard["member_ranges"]):
-                self._member_ranges[path, name] = span
-        self.entries.sort(key=lambda value: value[2])
-        self._archives: OrderedDict[Path, Any] = OrderedDict()
-
-    def __getstate__(self):
-        state = dict(self.__dict__)
-        state["_archives"] = OrderedDict()
-        return state
-
-    def close(self) -> None:
-        archives = getattr(self, "_archives", {})
-        for archive in archives.values():
-            archive.close()
-        archives.clear()
-
-    def __del__(self):
-        self.close()
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-    def _load_payload(self, index: int) -> dict[str, Any]:
-        (path, member_name, source_index, metadata) = self.entries[index]
-        archive = self._archives.get(path)
-        if archive is None:
-            if len(self._archives) >= self.max_open_archives:
-                (_, stale) = self._archives.popitem(last=False)
-                stale.close()
-            archive = path.open("rb")
-            self._archives[path] = archive
-        else:
-            self._archives.move_to_end(path)
-        from legospec.data.hidden_tar_raw import load_raw
-
-        (offset, size) = self._member_ranges[path, member_name]
-        payload = load_raw(
-            archive,
-            offset,
-            size,
-            expect_final_hidden=self._final_norm is None,
-            layer_ids=self.required_layer_ids | {self.final_layer_id}
-            if self.selective_read
-            else None,
-            max_length=self.max_length if self.selective_read else None,
-        )
-        if payload["sample_index"] != source_index:
-            raise HiddenCacheError("Raw member source index mismatch")
-        return payload
-
-    def eligible_indices(
-        self, *, block_size: int, complete_blocks: bool = False
-    ) -> list[int]:
-        """Return valid entry indices without opening a tar file."""
-        return [
-            index
-            for (index, (_, _, _, metadata)) in enumerate(self.entries)
-            if sample_metadata_has_valid_anchor(
-                metadata,
-                block_size=block_size,
-                max_length=self.max_length,
-                complete_blocks=complete_blocks,
-            )
-        ]
-
-    def shard_key(self, index: int) -> Path:
-        return self.entries[index][0]
-
-    def training_metadata(self, index: int) -> dict[str, Any]:
-        """Plan anchors from the manifest without opening hidden-state shards."""
-        (_, _, source_index, metadata) = self.entries[index]
-        length = min(self.max_length, int(metadata["sequence_length"]))
-        mask = torch.zeros(length)
-        for start, end in metadata["loss_mask_runs"]:
-            mask[start : min(end, length)] = 1
-        return dict(
-            input_ids=torch.zeros(length, dtype=torch.long),
-            attention_mask=torch.ones(length, dtype=torch.bool),
-            loss_mask=mask,
-            sample_index=source_index,
-        )
-
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        payload = self._load_payload(index)
-        input_ids = torch.as_tensor(payload.get("input_ids"))[: self.max_length]
-        attention_mask = torch.as_tensor(payload.get("attention_mask"))[
-            : self.max_length
-        ]
-        loss_mask = torch.as_tensor(payload.get("loss_mask"))[: self.max_length]
-        length = input_ids.numel()
-        if input_ids.ndim != 1 or length == 0:
-            raise HiddenCacheError("cached input_ids must be a non-empty vector")
-        if (
-            attention_mask.shape != input_ids.shape
-            or loss_mask.shape != input_ids.shape
-        ):
-            raise HiddenCacheError("cached token and mask shapes do not match")
-        raw_hidden = payload.get("hidden_states")
-        if not isinstance(raw_hidden, dict):
-            raise HiddenCacheError("cached hidden_states must be a dictionary")
-        hidden_states = {int(key): value for (key, value) in raw_hidden.items()}
-        final_hidden = payload.get("final_hidden_state")
-        if self._final_norm is None:
-            if not isinstance(final_hidden, torch.Tensor):
-                raise HiddenCacheError("cached final_hidden_state is missing")
-            final_hidden = final_hidden[: self.max_length]
-        selected = {}
-        layer_ids = self.required_layer_ids | (
-            {self.final_layer_id} if self._final_norm is not None else set()
-        )
-        for layer_id in sorted(layer_ids):
-            value = hidden_states.get(layer_id)
-            if not isinstance(value, torch.Tensor):
-                raise HiddenCacheError(f"cached layer {layer_id} is missing")
-            value = value[: self.max_length]
-            if (
-                value.ndim != 2
-                or value.shape[0] != length
-                or value.shape[1] != self.hidden_size
-            ):
-                raise HiddenCacheError(f"cached layer {layer_id} has invalid shape")
-            if self.validate_finite and (not torch.isfinite(value).all()):
-                raise HiddenCacheError(f"cached layer {layer_id} contains NaN or Inf")
-            selected[layer_id] = value
-        if self._final_norm is not None:
-            final_hidden = self._final_norm(selected[self.final_layer_id])
-        if final_hidden.shape != (length, self.hidden_size) or (
-            (self.validate_finite or self._final_norm is not None)
-            and (not torch.isfinite(final_hidden).all())
-        ):
-            raise HiddenCacheError(
-                "normalized final hidden has invalid shape or values"
-            )
-        return {
-            "sample_index": int(payload["sample_index"]),
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "loss_mask": loss_mask,
-            "hidden_states": selected,
-            "final_hidden_state": final_hidden,
-            "final_norm_layer_id": self.final_layer_id,
-        }
-
-
-class ShardAwareDistributedSampler(Sampler[int]):
-    """Shuffle shards and their members; keep each shard grouped for locality."""
-
-    ORDER_VERSION = 2
-
-    def __init__(
-        self,
-        dataset: RegenFullDataset,
-        eligible_indices: list[int],
-        *,
-        num_replicas: int,
-        rank: int,
-        shuffle: bool = True,
-        seed: int = 0,
-    ) -> None:
-        if num_replicas <= 0 or rank < 0 or rank >= num_replicas:
-            raise ValueError("invalid distributed sampler rank configuration")
-        self.dataset = dataset
-        self.eligible_indices = list(eligible_indices)
-        self.num_replicas = int(num_replicas)
-        self.rank = int(rank)
-        self.shuffle = bool(shuffle)
-        self.seed = int(seed)
-        self.epoch = 0
-        self.num_samples = math.ceil(len(self.eligible_indices) / self.num_replicas)
-        self.total_size = self.num_samples * self.num_replicas
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = int(epoch)
-
-    def _global_indices(self) -> list[int]:
-        groups: dict[Path, list[int]] = {}
-        for index in self.eligible_indices:
-            groups.setdefault(self.dataset.shard_key(index), []).append(index)
-        shard_keys = list(groups)
-        if self.shuffle:
-            generator = random.Random(self.seed + self.epoch)
-            generator.shuffle(shard_keys)
-            for key in shard_keys:
-                generator.shuffle(groups[key])
-        values = [index for key in shard_keys for index in groups[key]]
-        if values and len(values) < self.total_size:
-            values += [
-                values[index % len(values)]
-                for index in range(self.total_size - len(values))
-            ]
-        return values
-
-    def __iter__(self):
-        values = self._global_indices()
-        start = self.rank * self.num_samples
-        return iter(values[start : start + self.num_samples])
-
-
-class RegenFullCollator:
-    def __init__(self, pad_token_id: int, pad_to_length: int | None = None) -> None:
-        self.pad_token_id = int(pad_token_id)
-        self.pad_to_length = pad_to_length
-
-    @staticmethod
-    def _pad_to(tensor: torch.Tensor, length: int) -> torch.Tensor:
-        if tensor.shape[1] == length:
-            return tensor
-        shape = (tensor.shape[0], length - tensor.shape[1], *tensor.shape[2:])
-        return torch.cat((tensor, tensor.new_zeros(shape)), dim=1)
-
-    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        if not features:
-            raise HiddenCacheError("cannot collate an empty regen_full batch")
-        seq_len = max((item["input_ids"].numel() for item in features))
-        if self.pad_to_length is not None:
-            if seq_len > self.pad_to_length:
-                raise HiddenCacheError("cached sequence exceeds fixed padding length")
-            seq_len = self.pad_to_length
-
-        def pad_vectors(key: str, padding_value: int) -> torch.Tensor:
-            value = pad_sequence(
-                [item[key] for item in features],
-                batch_first=True,
-                padding_value=padding_value,
-            )
-            return self._pad_to(value, seq_len)
-
-        layer_ids = sorted(features[0]["hidden_states"])
-        if any((sorted(item["hidden_states"]) != layer_ids for item in features)):
-            raise HiddenCacheError("cached samples contain different hidden layers")
-        final_layer_id = int(features[0]["final_norm_layer_id"])
-        if any(
-            (int(item["final_norm_layer_id"]) != final_layer_id for item in features)
-        ):
-            raise HiddenCacheError("cached samples disagree on final-norm layer ID")
-        hidden_states = {}
-        for layer_id in layer_ids:
-            value = pad_sequence(
-                [item["hidden_states"][layer_id] for item in features],
-                batch_first=True,
-                padding_value=0.0,
-            )
-            hidden_states[layer_id] = self._pad_to(value, seq_len)
-        return {
-            "sample_index": torch.tensor(
-                [item["sample_index"] for item in features], dtype=torch.long
-            ),
-            "input_ids": pad_vectors("input_ids", self.pad_token_id),
-            "attention_mask": pad_vectors("attention_mask", 0),
-            "loss_mask": pad_vectors("loss_mask", 0),
-            "hidden_states": hidden_states,
-            "final_hidden_state": self._pad_to(
-                pad_sequence(
-                    [item["final_hidden_state"] for item in features],
-                    batch_first=True,
-                    padding_value=0.0,
-                ),
-                seq_len,
-            ),
-            "final_norm_layer_id": final_layer_id,
-        }

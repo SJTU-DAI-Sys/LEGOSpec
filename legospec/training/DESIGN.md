@@ -1,69 +1,58 @@
 # Training
 
-负责训练装配、数据调度、目标特征获取、单步计算、参数更新、记录及完整恢复。
-调用链为 scripts/composable/train.py → config.py → runtime/runner.py → runtime/setup.py。
+Training assembles models and data, schedules batches, obtains target features, computes gradients, updates parameters, logs results, and restores saved state.
 
-## 根目录
+The entrypoint is `scripts/composable/train.py`; `config.py` parses arguments, and `runtime/runner.py` coordinates the run using `runtime/setup.py`.
 
-- __init__.py：训练公共入口。
-- config.py：CLI、运行参数解析和入口校验。
+## Runtime
 
-模型配方与 loss 数学归 modeling/draft；损失输出使用 objective/outputs.py 的契约。
+- `runtime/setup.py`: draft/target/shared components, FSDP, optimizer, and TrainingStep construction.
+- `runtime/runner.py`: epochs, logical batches, microbatches, accumulation, updates, and saving.
+- `runtime/state.py`: phases, cursors, and session state.
+- `runtime/checkpoint.py`: weights and full training-state save/restore.
 
-## runtime/：训练生命周期
+Full restoration includes optimizer, scheduler, FP32 master parameters, per-rank RNG, cursor, and pending plans. Weights-only exports support inference or initialization of a new run.
 
-- setup.py：构造 draft、target、共享组件、FSDP、优化器和 TrainingStep，组装 session。
-- runner.py：遍历 epoch、逻辑 batch、microbatch 和累积窗口，调度 forward/backward、更新与保存。
-- state.py：Phase、RunState、TrainingSession 等阶段、游标和运行状态。
-- checkpoint.py：权重导出、完整训练状态保存/恢复、每 rank RNG 和恢复元数据。
+## Batch preparation
 
-完整恢复包含 optimizer、scheduler、FP32 master、每 rank RNG、游标和 pending plan。
-weights-only 用于推理或 init_from；恢复直接读写实际状态，不比较代码或配置版本。
+- `data/loader.py`: dataset/collator assembly, DP loaders, explicit sequence-parallel collator settings, and shard-aware distributed sampling.
+- `data/batch.py`: anchor sampling, label/mask alignment, packing, and TP batch selection.
+- `data/layout.py`: sample plans, packed layouts, and indices.
+- `data/planning.py`: cost estimates, balanced microsteps, token windows, and target workload planning.
+- `data/prefetch.py`: ordered CPU batch prefetch and optional single-batch CUDA H2D prefetch.
 
-## data/：训练输入和工作量规划
+General tokenization and disk formats belong to `legospec/data`.
 
-- loader.py：构造原始对话或隐藏态缓存 loader，选择 Dataset、collator 和分布式 sampler。
-- batch.py：anchor 采样、标签及 mask 对齐、逻辑 batch、打包/解包和 TP batch 选择。
-- layout.py：样本计划、packed batch 布局和索引契约。
-- planning.py：训练成本估计、均衡 microstep 分配、CPU token 窗口及 target 工作量规划。
-- prefetch.py：保持顺序的 CPU batch 预取和释放，以及保留 CPU 元数据的单批 CUDA H2D 预取。
+## Target supervision
 
-本目录组织训练批次；通用对话预处理和磁盘缓存格式归 legospec/data。
+- `target/setup.py`: capture requirements, online/cache selection, tokenizer, mask token, and shared components.
+- `target/features.py`: layer selection, concatenation, device transfer, and teacher-feature selection.
+- `target/streaming.py`: disaggregated target producers, packets, broadcasts, and scheduling.
 
-## target/：冻结监督的训练侧装配
+Capture and model-specific normalization belong to `modeling/target`; communication primitives belong to `distributed`.
 
-- setup.py：确定 capture 层和容量，选择在线/缓存特征，装配 tokenizer、mask token 和共享 embedding/head。
-- features.py：按目标层选择、拼接、设备搬运及取得明确的 teacher 特征。
-- streaming.py：分离部署中的 target producer、packet 组织、广播和训练包调度。
+## Step execution
 
-模型捕获、缩放、final norm 和 backend 差异归 modeling/target；进程间传输实现归 distributed。
+- `execution/step.py`: model, proposal, and objective execution within an FSDP forward.
+- `execution/supervision.py`: alignment of supervision rows, blocks, and vocabulary projections.
+- `execution/windows.py`: optimizer-window denominators and temporary batch lifetime.
 
-## execution/：单步计算和窗口分母
+Execution manages packed/chunked computation and normalization. Objective mathematics remain in `modeling/draft/objective`.
 
-- step.py：TrainingStep 和调用参数组织，在一次 FSDP forward 中执行模型、Proposal 与 Objective。
-- supervision.py：对齐目标监督行与 block，按需取得词表投影所需特征。
-- windows.py：统计完整 optimizer 窗口的 loss 分母，准备和释放临时 batch。
+## Optimization
 
-Execution 消费模型和 Objective 接口，处理 packed/chunked 执行及归一化；不拥有优化器调度。
+- `optim/optimizer.py`: parameter grouping, FP32 master parameters, AdamW/Muon integration, and gradient updates.
+- `optim/muon.py`: Muon math, matrix exchange, and sharded updates.
+- `optim/fsdp_layout.py`: FSDP layouts and matrix routing.
+- `optim/scheduler.py`: warmup, cosine, delayed, and staged learning-rate schedules.
 
-## optim/：优化器和学习率
+## Logging
 
-- optimizer.py：参数分类、BF16/FP32 master、AdamW/Muon 组合、梯度归一化及更新。
-- muon.py：Muon 数学、矩阵交换和分片更新。
-- fsdp_layout.py：读取 FSDP 参数布局，生成分片与矩阵路由信息。
-- scheduler.py：warmup、cosine、延迟和分阶段学习率调度。
+- `logger/metrics.py`: accuracy and acceptance-related additive statistics.
+- `logger/logging.py`: accumulation/reduction, log payloads, memory statistics, and tracker integration.
 
-参数布局读取集中在 fsdp_layout；优化数学不散入模型 forward 或 runner。
+Logging consumes results without advancing the training cursor.
 
-## logger/：指标与外部记录
+## H2D prefetch
 
-- metrics.py：token accuracy、硬标签接受长度、分布接受率及 expected acceptance 等加性指标。
-- logging.py：指标累积/归约、日志 payload、显存记录及 W&B 等 tracker 接入。
-
-Logger 只消费结果，不改变训练计算或样本游标。
-
-低层功能目录不反向调用 runtime/setup 或 runner；OPD 训练已移至 development/opd。
-
-Optimized 离线训练可用 `--h2d-prefetch` 启用单批 H2D 预取，默认关闭；可用 `--no-h2d-prefetch` 对照。
-独立 CUDA 流提前搬入一个 batch，训练流用 event 等待，并用 record_stream 管理显存生命周期。
-CPU token、mask 与规划元数据继续用于布局计算；预取不提交训练游标。额外显存随 batch 输入大小增长。
+Optimized offline training can enable `--h2d-prefetch`; it is disabled by default. A separate CUDA stream transfers one future batch, with events and record_stream controlling dependencies and storage lifetime. CPU token/mask/planning metadata remain available for layout construction. Prefetching does not commit the training cursor and requires additional device memory for the prefetched inputs.

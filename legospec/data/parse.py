@@ -238,7 +238,6 @@ class HarmonyParser(Parser):
         preformatted: bool = False,
         train_only_last_turn: bool = False,
     ) -> List[torch.Tensor]:
-        # conversation = process_harmony_conversations(conversation)
         if not preformatted:
             prompt_text = ""
             for j, message in enumerate(conversation):

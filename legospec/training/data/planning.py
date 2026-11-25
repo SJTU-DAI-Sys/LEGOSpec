@@ -237,8 +237,13 @@ class WindowPlanner:
         self._future_start = None
         self._closed = False
         self.async_planning = bool(getattr(args, "async_schedule_planning", False))
-        if self.async_planning and not hasattr(self.dataset, "training_metadata"):
-            raise ValueError("Async planning requires metadata-only dataset access")
+        # Online rows are token/mask data; offline caches need token-only metadata.
+        if (
+            self.async_planning
+            and args.train_hidden_states_path
+            and not hasattr(self.dataset, "training_metadata")
+        ):
+            raise ValueError("Offline async planning requires metadata-only dataset access")
         self.committed = 0
         if state is not None:
             self.committed = int(state["committed"])

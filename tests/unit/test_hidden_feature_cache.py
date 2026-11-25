@@ -1,21 +1,21 @@
 """Round-trip explicit decoder residual and normalized teacher streams."""
 
-import legospec.training.target.features as target_features
-
-from contextlib import nullcontext
 import io
 import json
-from pathlib import Path
-from types import SimpleNamespace
 import tempfile
 import unittest
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from safetensors.torch import save_file
-from legospec.data.capture_engine import Pipeline, check_capture_space
-from legospec.data.hidden_cache import RegenFullDataset, RegenFullCollator
-from legospec.data.hidden_tar_raw import RawSample, load_raw
+
+import legospec.training.target.features as target_features
+from legospec.data.hidden_cache import RawSample, load_raw
+from legospec.data.hidden_capture import Pipeline, check_capture_space
+from legospec.data.hidden_dataset import RegenFullCollator, RegenFullDataset
 
 
 class Metrics:
@@ -204,7 +204,7 @@ class HiddenFeatureCacheTests(unittest.TestCase):
 
         reserve = 64 * 1024**3
         pending_bytes = 3 * (2 * 3840 * 6 + 3 * 8) + 4096
-        with patch("legospec.data.capture_engine.shutil.disk_usage") as disk_usage:
+        with patch("legospec.data.hidden_capture.shutil.disk_usage") as disk_usage:
             disk_usage.return_value.free = reserve + pending_bytes
             check_capture_space(Path("."), Processed(), {0}, 6, 3840)
             with self.assertRaises(OSError):

@@ -1,25 +1,51 @@
+# coding=utf-8
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in HuggingFace Transformers.
+# Portions of this code are adapted from:
+#   - https://github.com/SafeAILab/EAGLE (Apache License 2.0)
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Build online JSON and cached-hidden training loaders and collators."""
 
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import random
+from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
+from datasets import Dataset
+from torch.utils.data import DataLoader, DistributedSampler, Sampler
 
 from legospec.data import (
     RegenFullCollator,
     RegenFullDataset,
-    ShardAwareDistributedSampler,
     build_training_dataset,
     load_hidden_cache_manifest,
-    prepare_dp_dataloaders,
 )
-from legospec.data.json_training import load_training_json
-from legospec.distributed import get_dp_group
+from legospec.data.dataset import (
+    DataCollatorWithPadding,
+    VlmDataCollatorWithPadding,
+    load_training_json,
+)
+from legospec.distributed import get_dp_group, get_draft_sp_group, get_sp_ulysses_group
 from legospec.modeling.config_utils import load_text_model_config
 from legospec.training.target.setup import required_hidden_layer_ids
 
@@ -73,12 +99,14 @@ def _prepare_dataloader(args, dataset, *, train_data_path: str):
     dataset = dataset.filter(
         _has_valid_anchor_supervision,
         fn_kwargs={"block_size": int(args.block_size)},
+        num_proc=args.build_dataset_num_proc,
         desc=f"Filtering examples with at least {minimum} labels and one trainable anchor",
     )
     dataloader = prepare_dp_dataloaders(
         dataset,
         args.batch_size,
         num_workers=args.dataloader_num_workers,
+        prefetch_factor=args.dataloader_prefetch_factor,
         shuffle=True,
         process_group=get_dp_group(),
         pad_to_length=args.max_length if args.pad_to_max_length else None,
@@ -317,3 +345,123 @@ def build_loader(session, tokenizer):
     return build_feature_dataloader(
         session.args, tokenizer, session.draft, "composable"
     )
+
+
+def prepare_dp_dataloaders(
+    dataset: Dataset,
+    batch_size: int,
+    num_workers: int = 4,
+    process_group: Optional[dist.ProcessGroup] = None,
+    pin_memory: Optional[bool] = False,
+    shuffle: Optional[bool] = False,
+    is_vlm: Optional[bool] = False,
+    prefetch_factor: Optional[int] = 2,
+    pad_to_length: Optional[int] = None,
+    **dataloader_kwargs,
+) -> DataLoader:
+    """
+    Prepare dataloader for distributed data parallel training.
+
+    Args:
+        dataset: The dataset to load data from.
+        batch_size: The batch size for each GPU.
+        num_workers: The number of workers for data loading.
+        process_group: The process group for distributed training.
+        pin_memory: Whether to pin memory for data loading.
+        shuffle: Whether to shuffle the dataset.
+        is_vlm: Whether the dataset is a vision-language model dataset.
+        **dataloader_kwargs: Additional keyword arguments for the DataLoader.
+
+    Returns:
+        A DataLoader for the dataset.
+    """
+    world_size = dist.get_world_size(process_group)
+    rank = dist.get_rank(process_group)
+    sampler = DistributedSampler(
+        dataset, num_replicas=world_size, rank=rank, shuffle=shuffle
+    )
+    if is_vlm:
+        datacollator_cls = VlmDataCollatorWithPadding
+    else:
+        datacollator_cls = DataCollatorWithPadding
+
+    if num_workers == 0:
+        prefetch_factor = None
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor,
+        collate_fn=(
+            datacollator_cls(
+                pad_to_length=pad_to_length,
+                sp_degree=dist.get_world_size(get_draft_sp_group()),
+                ulysses_degree=dist.get_world_size(get_sp_ulysses_group()),
+            )
+            if datacollator_cls is DataCollatorWithPadding
+            else datacollator_cls()
+        ),
+        drop_last=True,
+        **dataloader_kwargs,
+    )
+    return dataloader
+
+
+class ShardAwareDistributedSampler(Sampler[int]):
+    """Shuffle shards and their members; keep each shard grouped for locality."""
+
+    ORDER_VERSION = 2
+
+    def __init__(
+        self,
+        dataset: RegenFullDataset,
+        eligible_indices: list[int],
+        *,
+        num_replicas: int,
+        rank: int,
+        shuffle: bool = True,
+        seed: int = 0,
+    ) -> None:
+        if num_replicas <= 0 or rank < 0 or rank >= num_replicas:
+            raise ValueError("invalid distributed sampler rank configuration")
+        self.dataset = dataset
+        self.eligible_indices = list(eligible_indices)
+        self.num_replicas = int(num_replicas)
+        self.rank = int(rank)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_samples = math.ceil(len(self.eligible_indices) / self.num_replicas)
+        self.total_size = self.num_samples * self.num_replicas
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _global_indices(self) -> list[int]:
+        groups: dict[Path, list[int]] = {}
+        for index in self.eligible_indices:
+            groups.setdefault(self.dataset.shard_key(index), []).append(index)
+        shard_keys = list(groups)
+        if self.shuffle:
+            generator = random.Random(self.seed + self.epoch)
+            generator.shuffle(shard_keys)
+            for key in shard_keys:
+                generator.shuffle(groups[key])
+        values = [index for key in shard_keys for index in groups[key]]
+        if values and len(values) < self.total_size:
+            values += [
+                values[index % len(values)]
+                for index in range(self.total_size - len(values))
+            ]
+        return values
+
+    def __iter__(self):
+        values = self._global_indices()
+        start = self.rank * self.num_samples
+        return iter(values[start : start + self.num_samples])

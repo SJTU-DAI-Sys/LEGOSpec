@@ -1,6 +1,6 @@
-# FlashMTP data pipeline
+# Preparing training data
 
-The data preparation flow has one entry point and one schema boundary:
+Prepare conversations for online training, or capture target features for offline training:
 
 ```text
 arbitrary dataset
@@ -8,7 +8,7 @@ arbitrary dataset
   -> standard prompt JSONL
   -> regenerate_train_data.py
   -> regen_token_only (generated-answer JSONL)
-  -> prepare_hidden_states.py
+  -> capture_hidden_states.py
   -> regen_full (token/mask/hidden-state tar shards)
 ```
 
@@ -33,7 +33,7 @@ Hugging Face Parquet inputs can be filtered while they are streamed. Repeating
 files or row groups when their metadata permits it:
 
 ```bash
-.venv/bin/python scripts/data/convert_dataset.py convert \
+python scripts/data/convert_dataset.py convert \
   --input allenai/WildChat-4.8M \
   --input-format hf \
   --split train \
@@ -67,7 +67,7 @@ the only component that knows the source dataset's original fields.
 
 ```bash
 python scripts/data/regenerate_train_data.py \
-  --model /data/wanghanzhen/models/Qwen/Qwen3-4B \
+  --model /path/to/Qwen3-4B \
   --input-file-path /path/to/prompts.jsonl \
   --server-address localhost:30000
 ```
@@ -96,10 +96,16 @@ python -m scripts.data.capture_hidden_states \
   --tar-shard-bytes 2147483648
 ```
 
-Only `tar-raw-v1` is supported for capture and training. The pipeline uses asynchronous capture, reusable/preallocated pinned buffers, automatic bulk D2H for packed outputs, streaming SHA256 and asynchronous durable commits. Non-packed backend outputs use tensor layout adaptation. Capacity knobs remain available for memory, pending batches, workers and shard size; obsolete sync/format/ablation switches are removed.
+Capture produces raw-tar shards and a manifest. Set the layer IDs to match your draft recipe and keep the target checkpoint available for training. Capture needs a configured target backend and sufficient GPU memory.
 
-Samples store IDs, masks, selected raw decoder features and the explicit post-norm teacher feature. Gemma's final decoder output and final-norm output remain distinct; optional final-norm reconstruction retains its explicit feature contract.
+For offline training, set `launcher.train_hidden_states` to the completed cache directory instead of `launcher.train_data`. Training consumes a complete manifest. The cache stores selected raw decoder features separately from the normalized teacher feature used for vocabulary supervision.
 
-`--resume` validates committed shard identity and checksum, discards incomplete temporary shards and captures only missing source records. The final manifest is published after every async commit completes and all records are covered. Training must consume a complete manifest. Historical caches are retained on disk but unsupported formats require a separate explicit conversion before use.
+Use `--resume` to continue an interrupted capture. It checks committed shards and captures missing records. `--tar-shard-bytes` controls shard size. For Hugging Face capture, select `--target-model-backend hf --no-packed-requests`.
 
-`--no-packed-requests` selects a non-packed backend output layout; it does not change the storage format or create another writer. HF capture requires this option. Finite-value auditing, checksum validation and selective raw reads remain available in shared data facilities.
+Inspect all capture options with:
+
+```bash
+python -m scripts.data.capture_hidden_states --help
+```
+
+For response regeneration, start a compatible SGLang server before running step 2 and pass its address through `--server-address`. Choose generation temperature and token limits for your dataset. Existing answer conversations can be used directly for training without repeating regeneration.

@@ -152,6 +152,8 @@ def build_training_session(args):
         (session.target, tokenizer, session.components, _) = (
             build_target_and_components(args, drafts)
         )
+        # Finish every target replica before rank 0 starts dataset preparation.
+        dist.barrier()
         session.dataloader = build_loader(session, tokenizer)
         session.steps_per_epoch = len(session.dataloader)
     session.total_steps = optimizer_step_count(

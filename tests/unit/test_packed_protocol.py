@@ -122,7 +122,7 @@ def worker(rank, path):
 
 
 def test_tp_ragged_empty_rows_and_chunk_rounds():
-    root = Path(__file__).resolve().parents[1] / "artifacts" / "packed_protocol"
+    root = Path(__file__).resolve().parents[2] / "tmp_exp" / "artifacts" / "packed_protocol"
     root.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=root) as folder:
         mp.spawn(worker, args=(str(Path(folder) / "rendezvous"),), nprocs=2, join=True)

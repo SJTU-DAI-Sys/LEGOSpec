@@ -132,6 +132,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Ordered offline CPU queue; default 2 in optimized offline mode, otherwise 0.",
     )
     data.add_argument(
+        "--h2d-prefetch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Stage one CUDA batch ahead in optimized offline training; opt in.",
+    )
+    data.add_argument(
         "--async-schedule-planning",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -410,10 +416,13 @@ def resolve_execution_options(args):
         "hidden_cache_selective_read": optimized,
         "cpu_batch_prefetch": 2 if optimized and offline and collocated else 0,
         "async_schedule_planning": optimized and offline and collocated,
+        "h2d_prefetch": False,
     }
     for name, value in defaults.items():
         if getattr(args, name, None) is None:
             setattr(args, name, value)
+    if args.h2d_prefetch and not (optimized and offline and collocated):
+        raise ValueError("h2d-prefetch requires optimized collocated offline training")
     if args.cpu_batch_prefetch < 0:
         raise ValueError("cpu-batch-prefetch must be nonnegative")
     if args.cpu_batch_prefetch and not (offline and collocated):

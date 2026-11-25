@@ -26,7 +26,7 @@ weights-only 用于推理或 init_from；恢复直接读写实际状态，不比
 - batch.py：anchor 采样、标签及 mask 对齐、逻辑 batch、打包/解包和 TP batch 选择。
 - layout.py：样本计划、packed batch 布局和索引契约。
 - planning.py：训练成本估计、均衡 microstep 分配、CPU token 窗口及 target 工作量规划。
-- prefetch.py：保持顺序的 CPU batch 预取和释放。
+- prefetch.py：保持顺序的 CPU batch 预取和释放，以及保留 CPU 元数据的单批 CUDA H2D 预取。
 
 本目录组织训练批次；通用对话预处理和磁盘缓存格式归 legospec/data。
 
@@ -63,3 +63,7 @@ Execution 消费模型和 Objective 接口，处理 packed/chunked 执行及归�
 Logger 只消费结果，不改变训练计算或样本游标。
 
 低层功能目录不反向调用 runtime/setup 或 runner；OPD 训练已移至 development/opd。
+
+Optimized 离线训练可用 `--h2d-prefetch` 启用单批 H2D 预取，默认关闭；可用 `--no-h2d-prefetch` 对照。
+独立 CUDA 流提前搬入一个 batch，训练流用 event 等待，并用 record_stream 管理显存生命周期。
+CPU token、mask 与规划元数据继续用于布局计算；预取不提交训练游标。额外显存随 batch 输入大小增长。

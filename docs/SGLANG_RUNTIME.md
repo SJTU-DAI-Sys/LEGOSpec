@@ -46,7 +46,7 @@ created before the target/draft split. The trainer WORLD is preserved.
 ## Validation
 
 Task artifacts and reproducible smoke scripts:
-`tests/environment_upgrade_20261123/`.
+`tmp_exp/environment_upgrade_20261123/`.
 The full regression passed: 582 tests, 9 existing candidate-only CE skips and
 13 subtests. Real-weight prefill passed for Gemma 12B (TP1/TP2), Qwen3-4B
 (TP1 and disaggregated target/draft ranks), and Qwen3.6-35B-A3B (TP2).

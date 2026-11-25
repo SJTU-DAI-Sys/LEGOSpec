@@ -99,12 +99,19 @@ def iter_logical_batches(session, phase):
     depth = int(getattr(session.args, "cpu_batch_prefetch", 0))
     if depth < 0:
         raise ValueError("cpu-batch-prefetch must be nonnegative")
-    if depth and session.topology is None and session.args.train_hidden_states_path:
-        from legospec.training.data.prefetch import ordered_cpu_batches
+    from legospec.training.data.prefetch import (
+        cuda_prefetched_batches,
+        ordered_cpu_batches,
+    )
 
-        yield from ordered_cpu_batches(_iter_logical_batches(session, phase), depth)
-        return
-    yield from _iter_logical_batches(session, phase)
+    batches = _iter_logical_batches(session, phase)
+    if depth and session.topology is None and session.args.train_hidden_states_path:
+        batches = ordered_cpu_batches(batches, depth)
+    if getattr(session.args, "h2d_prefetch", False):
+        batches = cuda_prefetched_batches(
+            batches, session.draft.target_layer_ids, session.args.require_target_last_hidden
+        )
+    yield from batches
 
 
 def _iter_logical_batches(session, phase):

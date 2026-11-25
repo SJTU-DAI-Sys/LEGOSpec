@@ -108,9 +108,10 @@ def _step_values(session, data, microbatch_start=None, microbatch_end=None):
     else:
         from legospec.training.data.batch import select_tp_rank_batch
 
-        input_ids = data["input_ids"].cuda(non_blocking=True)
-        attention_mask = data["attention_mask"].cuda(non_blocking=True)
-        loss_mask = data["loss_mask"].cuda(non_blocking=True)
+        inputs = data.get("_cuda_inputs", data)
+        input_ids = inputs["input_ids"].cuda(non_blocking=True)
+        attention_mask = inputs["attention_mask"].cuda(non_blocking=True)
+        loss_mask = inputs["loss_mask"].cuda(non_blocking=True)
         target_output = None
         if session.target is not None:
             target_inputs = (

@@ -34,6 +34,6 @@ Target 的 backend 与模型 adapter 分离：HF/SGLang 管执行与资源；默
 
 2026-11-23：native packed capture 与 TP runtime 收入 target/sglang_backend；在线和离线共用 target factory 与 LEGOSpec 分布式初始化。Gemma 的 final norm 重建也归 adapter。其余边界检查和后续结构计划见 TARGET_CAPTURE_PLAN.md。
 
-2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tests/defer_opd_20261123/。
+2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tmp_exp/defer_opd_20261123/。
 
 2026-11-23：移除 draft/composable 目录层级。attention 统一为 Layer.attention 子模块，状态归 backbone/state，stepwise 归 backbone，Objective 输出和权重数学不再依赖 training；组件管理特殊初值。详见 legospec/modeling/DESIGN.md。

@@ -11,4 +11,4 @@ shuffle 与 anchor 的种子只依赖实际 seed、epoch、phase、window 和样
 training_mode=legacy|optimized 仍是已明确保留的执行模式。模型结构选择、外部依赖版本要求、缓存存储编码不属于这次训练恢复清理范围。
 
 本次只修改当前源码、测试和说明；不迁移已有 checkpoint、cache、发布权重或历史运行快照。
-验证记录：tests/resume_simplification_20261122/。
+验证记录：tmp_exp/resume_simplification_20261122/。

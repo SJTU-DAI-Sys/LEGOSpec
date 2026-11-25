@@ -55,3 +55,6 @@ tests/**/git_status_before.txt
 tests/**/status_before.txt
 tests/**/environment.json
 tests/**/files.json
+
+# Local experiments, debugging, profiling, snapshots and generated test output
+/tmp_exp/

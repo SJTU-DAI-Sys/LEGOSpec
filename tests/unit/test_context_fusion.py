@@ -1,6 +1,5 @@
 """Public regression tests for DFlare fusion, gradients and standalone export."""
 
-from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -141,7 +140,7 @@ class ContextFusionTests(unittest.TestCase):
         for fusion in [None, "channel_softmax_shared_projection"]:
             with self.subTest(fusion=fusion):
                 model = LegoSpecModel(config(fusion))
-                with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+                with tempfile.TemporaryDirectory() as folder:
                     export_composable(model, folder)
                     loaded = AutoModel.from_pretrained(
                         folder, trust_remote_code=True, local_files_only=True

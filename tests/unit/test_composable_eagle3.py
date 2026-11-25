@@ -662,8 +662,8 @@ def test_export_reload_and_cold_inference():
     c = config()
     model, shared = LegoSpecModel(c), components(c)
     data = batch(c)
-    (ROOT / "tests/artifacts/eagle3").mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=ROOT / "tests/artifacts/eagle3") as folder:
+    (ROOT / "tmp_exp/artifacts/eagle3").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=ROOT / "tmp_exp/artifacts/eagle3") as folder:
         export_composable(model, folder)
         loaded = AutoModel.from_pretrained(
             folder, trust_remote_code=True, local_files_only=True
@@ -759,8 +759,8 @@ def test_two_rank_ddp_matches_full_batch():
     import tempfile
     import torch.multiprocessing as mp
 
-    (ROOT / "tests/artifacts/eagle3").mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=ROOT / "tests/artifacts/eagle3") as directory:
+    (ROOT / "tmp_exp/artifacts/eagle3").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=ROOT / "tmp_exp/artifacts/eagle3") as directory:
         mp.spawn(
             _ddp_worker,
             args=(str(Path(directory).resolve() / "gloo-init"),),

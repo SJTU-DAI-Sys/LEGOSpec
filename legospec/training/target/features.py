@@ -29,6 +29,7 @@ def select_target_features(
 
 
 def prepare_target_features(data, target_output, draft, require_last: bool):
+    data = data.get("_cuda_inputs", data)
     hidden_states = (
         data["hidden_states"] if target_output is None else target_output.hidden_states
     )

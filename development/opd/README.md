@@ -9,7 +9,7 @@
 - integration_snapshots/：移出前的 CLI、TrainingStep、target setup、窗口、
   checkpoint、logger 和 backend 接口，供恢复开发时参考。
 - configs/anchor_comparison_sft_rnn.yaml：OPD 对比实验的 SFT 对照 launcher。
-- 测试资料位于仓库 tests/development/opd/，不进入默认回归。
+- 测试资料位于仓库 development/opd/tests/，不进入默认回归。
 
 这些是开发资料，不是可独立运行的插件。快照中的旧导入、接口和配置按原样保留；
 恢复开发时按当时的组件边界整合，不能整文件覆盖主代码。

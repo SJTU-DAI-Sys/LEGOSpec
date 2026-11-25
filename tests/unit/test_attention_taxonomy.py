@@ -401,3 +401,29 @@ def test_mla_optimizer_head_geometry_after_module_move():
         2,
         (4, 8),
     )
+
+
+@pytest.mark.parametrize("variant,kv_heads", [("gqa", 8), ("mha", 32)])
+def test_draft_attention_geometry_independent_of_target(variant, kv_heads, tmp_path):
+    torch.set_num_threads(1)
+    c = config(variant)
+    c.target_attention = dict(num_attention_heads=24, num_key_value_heads=4, head_dim=256)
+    c.composable_config["attention_configs"][variant].update(
+        num_attention_heads=32, num_key_value_heads=kv_heads, head_dim=2
+    )
+    c.validate_recipe()
+    model = LegoSpecModel(c)
+    attention = model.backbone.layers[0].attention
+    assert attention.q_proj.out_features == 64
+    assert attention.k_proj.out_features == 2 * kv_heads
+    output = model(data()).backbone_hidden_states
+    output.square().mean().backward()
+    assert torch.isfinite(attention.q_proj.weight.grad).all()
+    model.save_pretrained(tmp_path)
+    restored = LegoSpecModel.from_pretrained(tmp_path)
+    assert restored(data()).backbone_hidden_states.shape == output.shape
+    assert restored.config.target_attention == c.target_attention
+    assert restored.backbone.layers[0].attention.config.num_attention_heads == 32
+    c.composable_config["attention_configs"][variant]["num_key_value_heads"] = 7
+    with pytest.raises(ValueError, match="KV dividing Q"):
+        c.validate_recipe()

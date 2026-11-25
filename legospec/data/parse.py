@@ -304,6 +304,12 @@ class ThinkingParser(GeneralParser):
         super().__init__(tokenizer, chat_template)
 
     def apply_chat_template(self, messages, **kwargs) -> str:
+        if self.chat_template.reasoning_effort is not None:
+            kwargs.setdefault("reasoning_effort", self.chat_template.reasoning_effort)
+        if any("reasoning_content" in message for message in messages):
+            return self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False, **kwargs
+            )
         if messages[-1]["role"] == "assistant":
             conversation_history = self.tokenizer.apply_chat_template(
                 messages[:-1],

@@ -2,7 +2,6 @@
 
 import tempfile
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 import torch
@@ -144,8 +143,7 @@ def test_causal_export_and_incremental_cache():
         model(first)
         expected = model(second).backbone_hidden_states
         torch.testing.assert_close(model(cached).backbone_hidden_states, expected)
-    base = Path(__file__).resolve().parents[1]
-    with tempfile.TemporaryDirectory(dir=base) as folder:
+    with tempfile.TemporaryDirectory() as folder:
         export_composable(model, folder)
         loaded = AutoModel.from_pretrained(
             folder, trust_remote_code=True, local_files_only=True

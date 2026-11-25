@@ -57,5 +57,5 @@ legospec/data/
 
 ## 验证记录
 
-边界整理时的 0.5.9 导入失败保留在 tests/capture_boundaries_20261123/environment.json，属于升级前记录。
+边界整理时的 0.5.9 导入失败保留在 tmp_exp/capture_boundaries_20261123/environment.json，属于升级前记录。
 当前 runtime、真实模型测试及完整回归结果见 [SGLang runtime](SGLANG_RUNTIME.md)。

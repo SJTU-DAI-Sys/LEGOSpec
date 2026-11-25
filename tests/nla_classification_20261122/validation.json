@@ -1,6 +1,0 @@
-{
-  "status": "complete",
-  "tests_passed": 10,
-  "class_ast_unchanged": true,
-  "semantics": "token-weighted negative log overlap; no complete-block requirement"
-}

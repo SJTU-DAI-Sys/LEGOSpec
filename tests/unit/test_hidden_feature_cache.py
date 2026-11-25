@@ -135,7 +135,7 @@ class HiddenFeatureCacheTests(unittest.TestCase):
             load_raw(io.BytesIO(member), 0, len(member), expect_final_hidden=False),
         )
 
-        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
+        with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             weight = torch.tensor([1.0, 2.0, 3.0, 4.0])
             eps = 1e-6

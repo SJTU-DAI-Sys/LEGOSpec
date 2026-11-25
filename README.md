@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/legospec_logo.svg" alt="LEGOSpec logo" width="480"/>
+</p>
+
 # LEGOSpec
 
 Composable speculative draft models built from **Context, Backbone, Proposal and Objective**, with shared training, data, distributed and inference facilities.
@@ -13,13 +17,15 @@ Public API: `from legospec import LegoSpecModel, LegoSpecConfig`.
 Use `python -m scripts.composable.train` or `scripts/composable/run_training_composable.sh CONFIG.yaml`.
 Algorithms are recipes; there are no standalone full-algorithm implementations. Supported combinations are checked by the schema. Hidden caches use raw tar only.
 
+See the [Testing guide](tests/README.md) for reusable regression tests. Local experiments and generated artifacts belong in the Git-ignored tmp_exp/ directory.
+
 Dependencies are pinned in `pyproject.toml` and `uv.lock`; testing tools are centralized in the `test` dependency group. See [SGLang runtime and installation](docs/SGLANG_RUNTIME.md) for the CUDA 13 environment.
 
 ```sh
 OMP_NUM_THREADS=1 python -m pytest tests/unit -q
 ```
 
-Set `CUDA_VISIBLE_DEVICES` to available devices for CUDA coverage, or an empty value for CPU coverage. Generated test files stay in `tests/artifacts`.
+Set `CUDA_VISIBLE_DEVICES` to available devices for CUDA coverage, or an empty value for CPU coverage. Generated test files stay in `tmp_exp/artifacts`.
 Keep `training_mode: legacy | optimized`. New launchers explicitly save every 15,000 optimizer steps and final weights, with full training state for resume.
 
 `model_publish` is a separate native-format weight release. Its config and weights are not implicitly converted by this source refactor. Active training snapshots, caches and checkpoints remain in their existing locations.

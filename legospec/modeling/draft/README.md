@@ -18,4 +18,4 @@ GDN/KDA 固定包含共享投影的逐头 gated block attention。
 递归历史回退需要完整状态快照或重算。
 
 export_composable 生成独立推理包，冷加载无需训练包。
-当前回归及数值对照见 tests/draft_boundaries_20261123。
+当前回归及数值对照见 tmp_exp/draft_boundaries_20261123。

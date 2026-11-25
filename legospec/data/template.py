@@ -22,6 +22,7 @@ class ChatTemplate(BaseModel):
     parser_type: str = "general"
     assistant_pattern_type: str = "general"
     enable_thinking: bool = False
+    reasoning_effort: str | None = None
 
 
 class TemplateRegistry:
@@ -341,5 +342,19 @@ TEMPLATE_REGISTRY.register(
         end_of_turn_token="<|im_end|>\n",
         parser_type="thinking",
         enable_thinking=True,
+    ),
+)
+
+
+TEMPLATE_REGISTRY.register(
+    name="qwen3.8",
+    template=ChatTemplate(
+        assistant_header="<|im_start|>assistant\n<think>\n",
+        user_header="<|im_start|>user\n",
+        system_prompt="",
+        end_of_turn_token="<|im_end|>\n",
+        parser_type="thinking",
+        enable_thinking=True,
+        reasoning_effort="medium",
     ),
 )

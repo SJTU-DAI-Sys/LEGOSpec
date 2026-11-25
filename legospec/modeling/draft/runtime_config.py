@@ -201,8 +201,6 @@ def _validate_expanded(config):
             else:
                 integer(value, kind + "." + key)
         if kind in ("mha", "gqa", "mqa"):
-            if profile["num_attention_heads"] != target["num_attention_heads"]:
-                raise ValueError("MHA/GQA Q heads must equal target Q heads")
             if (
                 profile["num_attention_heads"] % profile["num_key_value_heads"]
                 or profile["head_dim"] % 2

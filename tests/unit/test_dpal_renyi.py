@@ -32,7 +32,7 @@ from legospec.modeling.draft.loss_config import normalize_objective
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACTS = ROOT / "tests/artifacts/dpal_renyi"
+ARTIFACTS = ROOT / "tmp_exp/artifacts/dpal_renyi"
 REFERENCE = (
     ROOT
     / "tests/reference/dpal_upstream/specforge/algorithms/common/dflash_family_model.py"

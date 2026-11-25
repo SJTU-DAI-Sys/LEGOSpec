@@ -14,7 +14,7 @@
 - `snapshots/legospec/modeling/draft/composable/objective/dpal.py`：含 D-PAL++ 分支的原始实现，同时含共享的普通 D-PAL。
 - `snapshots/` 其他文件：移出前的 schema、注册、配置归一化及训练集成参考。
 - `configs/`、`scripts/config/`：原始 JSON 配方和 launcher。路径、权重引用按原样保留，其中旧 TV launcher 引用的 JSON 在移出前已不存在。这些是开发资料，不是当前可运行入口。
-- 对应测试快照位于仓库 `tests/development/objectives/`。
+- 对应测试快照位于仓库 `development/objectives/tests/`。
 
 ## 恢复开发
 

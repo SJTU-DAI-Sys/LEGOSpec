@@ -76,7 +76,7 @@ def test_algorithm_export_loads_outside_checkout(algorithm):
     from legospec.training.runtime.checkpoint import export_draft
 
     model = tiny_model(algorithm)
-    output = ROOT / "tests/artifacts/component_exports"
+    output = ROOT / "tmp_exp/artifacts/component_exports"
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output) as folder:
         folder = Path(folder)

@@ -55,3 +55,5 @@ H800_2 主项目 Python 入口仍为
 ## 实现位置
 
 Dense 位于 `attention/dense.py`，latent 位于 `attention/latent.py`，GDN/KDA 与内部 block attention 位于 `attention/linear/`；full/SWA/DSA 位于 `attention/access/`，Flex 等执行依赖位于 `attention/backends/`。详见 `legospec/modeling/DESIGN.md`。
+
+Dense draft attention heads may differ from the target model. Explicit GQA/MHA/MQA profiles control draft projections; omitted geometry inherits target defaults. Q must be divisible by KV and head_dim must be even. Qwen3.8-27B uses target 24/4/256 while the draft recipe uses 32/8/128.

@@ -16,6 +16,6 @@
 
 2026-11-23 capture 边界收尾：删除 Gemma 专属 capture 文件/数据层构造分支；native capture 和并行运行时归 backend，模型 final norm 重建归 adapter。其余尚未实施的边界建议详见 TARGET_CAPTURE_PLAN.md。
 
-2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tests/defer_opd_20261123/。
+2026-11-23：OPD 的剩余 scorer、sampled-anchor 训练/回放、CLI 和元数据移入 development/opd；正式代码当前不支持 OPD，普通 E2E-TV 和正常 anchor 抽样保留。回归与扫描见 tmp_exp/defer_opd_20261123/。
 
 2026-11-23：draft 组件边界重构已实施，四轴直属 draft；移除旧 attention 配方与独立 block 分支，统一 attention 组件，局部初始化归组件，状态操作归 backbone，Objective 不依赖 training。结构见 legospec/modeling/DESIGN.md。

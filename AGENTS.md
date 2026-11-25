@@ -23,8 +23,21 @@
 
 禁令：非必要不要滥用 try/catch（异常捕获），也不要硬把简单的逻辑拆碎。
 
-Store debugging, testing, and evaluation scripts and files in the repository's
-`tests/` directory.
+Keep reusable correctness and regression tests in the repository's `tests/`
+directory. Keep test fixtures small and reproducible; generated test output goes
+under `tmp_exp/artifacts/`.
+
+Store experiments, debugging scripts, performance benchmarks/profiler traces,
+logs, evaluation results, and historical source/numerical snapshots in the
+repository-root `tmp_exp/` directory, organized by task or experiment.
+`tmp_exp/` is local development material and must stay excluded from Git and
+release packages. Reusable public benchmark entrypoints may live in
+`benchmarks/`; their generated results still belong in `tmp_exp/`.
+
+Keep deferred implementation code and its associated test snapshots in
+`development/`, outside the installed package. Keep model weights, datasets,
+and large shared caches in their existing dedicated storage locations; record
+their paths in experiments rather than copying them into Git.
 
 For new training runs, save weights every 15,000 optimizer steps and save the
 final weights. Set `save_interval: 15000` and, where supported,

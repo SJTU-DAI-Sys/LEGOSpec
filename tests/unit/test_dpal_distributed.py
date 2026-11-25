@@ -84,7 +84,7 @@ def worker(rank, rendezvous):
 
 
 def test_cpu_ddp_uneven_counts_zero_rank_and_accumulation():
-    folder = Path(__file__).resolve().parents[1] / "artifacts" / "dpal_distributed"
+    folder = Path(__file__).resolve().parents[2] / "tmp_exp" / "artifacts" / "dpal_distributed"
     folder.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=folder) as d:
         mp.spawn(worker, args=(str(Path(d) / "rendezvous"),), nprocs=2, join=True)
